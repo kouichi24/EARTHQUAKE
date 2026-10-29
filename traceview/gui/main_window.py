@@ -680,6 +680,7 @@ class MainWindow(QMainWindow):
             m.setFlag(QGraphicsEllipseItem.ItemIgnoresTransformations, True)
             m.setZValue(25)
             m.setToolTip(f"{ISSUE_LABEL.get(iss.kind, iss.kind)}: {iss.msg}")
+            m.setData(0, iss.kind)
             self.scene.addItem(m)
             d["issues"].append(m)
         for p in b.pending:
@@ -722,7 +723,8 @@ class MainWindow(QMainWindow):
             for it in d["lines"].values():
                 it.setVisible(self.cb_lines.isChecked() and vis_band)
             for it in d["issues"]:
-                it.setVisible(self.cb_issues.isChecked() and vis_band)
+                # the many small ambiguity marks only appear once zoomed in; serious ones always show
+                it.setVisible(self.cb_issues.isChecked() and vis_band and (zoomed or it.data(0) != "ambiguous"))
             for it in d["pending"]:
                 it.setVisible(vis_band)
 
