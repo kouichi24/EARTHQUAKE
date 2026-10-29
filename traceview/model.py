@@ -38,6 +38,7 @@ class Band:
     line_bottom: float = 0.0
     line_top_manual: bool = False
     line_bottom_manual: bool = False
+    line_zero_manual: bool = False
     end_x: float = 0.0
     complete: bool = False           # trace reached the end of the paper
     confirmed: bool = False          # user confirmed the reading (MS-04)
@@ -47,13 +48,15 @@ class Band:
     initial: dict = None
 
     # -- snapshots -------------------------------------------------------------
-    def snapshot(self):
+    def snapshot(self, with_pending=True):
         return dict(
             path=self.path.copy(), inferred=list(self.inferred),
             vertices=[Vertex.from_dict(v.to_dict()) for v in self.vertices],
-            manual_points=copy.deepcopy(self.manual_points), pending=copy.deepcopy(self.pending),
+            manual_points=copy.deepcopy(self.manual_points),
+            pending=copy.deepcopy(self.pending) if with_pending else [],
             line_zero=self.line_zero, line_top=self.line_top, line_bottom=self.line_bottom,
             line_top_manual=self.line_top_manual, line_bottom_manual=self.line_bottom_manual,
+            line_zero_manual=self.line_zero_manual,
             end_x=self.end_x, complete=self.complete, confirmed=self.confirmed,
             issues=copy.deepcopy(self.issues), y0=self.y0,
         )
@@ -67,10 +70,11 @@ class Band:
         for k in ("line_zero", "line_top", "line_bottom", "line_top_manual", "line_bottom_manual",
                   "end_x", "complete", "confirmed", "y0"):
             setattr(self, k, snap[k])
+        self.line_zero_manual = snap.get("line_zero_manual", False)
         self.issues = copy.deepcopy(snap["issues"])
 
     def push_undo(self, limit):
-        self.undo.append(self.snapshot())
+        self.undo.append(self.snapshot(with_pending=False))
         if len(self.undo) > limit:
             self.undo.pop(0)
         self.redo.clear()
@@ -78,15 +82,19 @@ class Band:
     def do_undo(self):
         if not self.undo:
             return False
-        self.redo.append(self.snapshot())
+        pend = self.pending
+        self.redo.append(self.snapshot(with_pending=False))
         self.restore(self.undo.pop())
+        self.pending = pend            # unapplied edits are not part of the history
         return True
 
     def do_redo(self):
         if not self.redo:
             return False
-        self.undo.append(self.snapshot())
+        pend = self.pending
+        self.undo.append(self.snapshot(with_pending=False))
         self.restore(self.redo.pop())
+        self.pending = pend
         return True
 
     def reset_to_initial(self):

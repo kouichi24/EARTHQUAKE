@@ -14,6 +14,7 @@ class Vertex:
     turn: str = "bend"         # end (dead-end reversal) | bend (smooth turn)
     revisit: int = 0           # how many extra times the pen path passes this tip
     note: str = ""
+    suspect: bool = False      # lies on a stretch whose ownership is doubtful: not used for max/min
 
     def to_dict(self):
         return asdict(self)

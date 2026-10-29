@@ -79,14 +79,14 @@ def prepare(rgb, params):
     ref, ref_zone = _extend_ref_lines(ink, ref, params, (x0, x1))
     ink = ink & ~ref
 
-    # Small specks away from everything are dirt/noise.
-    ink = _drop_small(ink, params.min_component_area)
     # A spike that crosses a reference line loses its pixels inside the erased band: restore them
     # when ink exists above and below (vertical closing, applied only inside the erased band).
     band = cv2.dilate(ref.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (3, 9))) > 0
     closed = cv2.morphologyEx(ink.astype(np.uint8), cv2.MORPH_CLOSE,
                               cv2.getStructuringElement(cv2.MORPH_RECT, (3, 25))) > 0
     ink = ink | (closed & band)
+    # Small specks away from everything are dirt/noise.
+    ink = _drop_small(ink, params.min_component_area)
     ink = _fill_small_holes(ink, params.hole_fill_area)
     return Prepared(paper=paper, ink=ink, ink_raw=ink_raw, ref_lines=ref, ref_zone=ref_zone)
 
@@ -136,6 +136,9 @@ def _extend_ref_lines(ink, ref, params, xs):
     thin = ink & (runs <= params.ref_line_max_thick + 3)
     out = ref.copy()
     h, w = ink.shape
+    rr = runs[ref]
+    half = int(np.ceil(float(np.median(rr[rr > 0])) / 2.0)) + 1 if (rr > 0).any() else 3   # erase half-width
+    half = max(2, min(half, 5))
     xx = np.arange(x0, x1)
     fits = []
     for i in range(1, n):
@@ -167,9 +170,9 @@ def _extend_ref_lines(ink, ref, params, xs):
         # line) the line is kept: erasing there would cut the waveform.
         y0i = np.round(yl).astype(int)
         near = np.zeros(len(xx), bool)
-        for dy in range(5, 9):
+        for dy in range(half + 1, half + 8):
             near |= ink[np.clip(y0i - dy, 0, h - 1), xx] | ink[np.clip(y0i + dy, 0, h - 1), xx]
-        for dy in range(-3, 4):
+        for dy in range(-half, half + 1):
             yy = np.clip(y0i + dy, 0, h - 1)
             zone[yy, xx] = True
             sel = thin[yy, xx] & ~near

@@ -1,0 +1,8 @@
+numpy
+scipy
+opencv-python-headless
+scikit-image
+PySide6
+PyMuPDF
+openpyxl
+Pillow

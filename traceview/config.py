@@ -13,7 +13,7 @@ class Params:
     ref_line_max_thick: int = 9        # ...and thinner than this [px]
     hole_fill_area: int = 60           # holes smaller than this are filled before thinning [px]
     spur_min_len: int = 6              # skeleton spurs shorter than this are ignored [px]
-    tip_min_prominence: float = 5.0    # minimum y prominence of a vertex [px]
+    tip_min_prominence: float = 6.0    # minimum y prominence of a vertex [px]
     origin_strip_frac: float = 0.07    # width of the strip searched for trace origins (fraction of paper width)
     origin_min_gap_frac: float = 0.06  # minimum vertical gap between bands (fraction of paper height)
     snap_radius: int = 14              # radius used to snap an edited vertex to the image line [px]

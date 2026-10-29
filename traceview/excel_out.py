@@ -87,7 +87,7 @@ def export_xlsx(engine, out_path, include_all_points=False):
     heads = ["波形番号", "名称", "確認状態", "0線の高さY[px]", "上線の高さY[px]", "下線の高さY[px]", "線の調整状態",
              "最大値", "最大値X[px]", "最大値Y[px]", "最小値", "最小値X[px]", "最小値Y[px]",
              "上振幅", "下振幅", "上下幅", "線基準 上振幅", "線基準 下振幅", "線基準 上下幅",
-             "連続頂点間の最大差(参考)", "単位", "末端まで追跡", "要確認の数", "頂点数"]
+             "連続頂点間の最大差(参考)", "単位", "末端まで追跡", "要確認の数", "頂点数", "最大・最小の対象外(所属要確認)の頂点数"]
     for c, h in enumerate(heads, 1):
         cell = ws.cell(r0, c, h)
         cell.font = bold
@@ -104,7 +104,8 @@ def export_xlsx(engine, out_path, include_all_points=False):
                m.get("min_value"), _r(m.get("min_x")), _r(m.get("min_y")),
                m.get("up_amp"), m.get("down_amp"), m.get("span"),
                m.get("line_up"), m.get("line_down"), m.get("line_span"),
-               m.get("max_step"), unit, "はい" if b.complete else "いいえ", len(b.issues), len(b.vertices)]
+               m.get("max_step"), unit, "はい" if b.complete else "いいえ", len(b.issues), len(b.vertices),
+               m.get("n_suspect", 0)]
         for c, v in enumerate(row, 1):
             ws.cell(r0 + 1 + i, c, round(v, 3) if isinstance(v, float) else v)
     note_r = r0 + len(engine.bands) + 2

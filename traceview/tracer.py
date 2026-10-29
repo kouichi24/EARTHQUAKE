@@ -69,6 +69,22 @@ class Walker:
                 s -= 0.8
         return s
 
+    def _outside_edges(self):
+        """Edges that lie in another band's territory are never entered (TR-01: no hopping to a neighbour)."""
+        if self.corridor is None:
+            return ()
+        if getattr(self, "_outside", None) is None:
+            lo, hi = self.corridor[0] - 20, self.corridor[1] + 20
+            out = set()
+            for i, e in enumerate(self.g.edges):
+                if e.inferred:
+                    continue
+                y = e.pix[:, 1]
+                if np.median(y) < lo or np.median(y) > hi:
+                    out.add(i)
+            self._outside = out
+        return self._outside
+
     def _ref_penalty(self, eid):
         """Edges that run along a reference line are only taken when nothing else is possible."""
         if self.ref_zone is None:
@@ -88,6 +104,9 @@ class Walker:
         total = sum(e.length for e in g.edges) + 1
         max_steps = max_steps or 4 * total + 10
         visited = set()
+        for b in self._outside_edges():
+            visited.add((b, True))
+            visited.add((b, False))
         for b in (blocked or ()):
             visited.add((b, True))
             visited.add((b, False))

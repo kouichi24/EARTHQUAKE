@@ -43,6 +43,9 @@ def compute_measure(vertices, y0, y_top_line, y_bottom_line, scale, cal):
     """
     inv = 1.0 / scale if scale else 1.0
     res = {}
+    sure = [v for v in vertices if not getattr(v, "suspect", False)]
+    res["n_suspect"] = len(vertices) - len(sure)
+    vertices = sure
     if vertices:
         top = min(vertices, key=lambda v: v.y)
         bot = max(vertices, key=lambda v: v.y)

@@ -205,6 +205,7 @@ class Engine:
         b.path, b.inferred, b.end_x = path, inf, end_x
         b.vertices = extract_vertices(path, rev, self.params.tip_min_prominence, self.ink)
         self._mark_manual(b)
+        self._mark_suspect(b)
         W = self.work.shape[1]
         b.complete = end_x >= self.prepared.paper[2] - 0.03 * W
         b.issues = []
@@ -234,6 +235,17 @@ class Engine:
         if not b.line_top_manual or not b.line_bottom_manual or True:
             self.reset_lines(b, only_auto=True)
 
+    def _mark_suspect(self, b):
+        """Vertices on stretches that leave the band's territory are candidates only (MS-04)."""
+        origins = [bd.origin for bd in self.bands] if self.bands else [b.origin]
+        if b.index >= len(origins) or len(origins) < 2 or not b.vertices:
+            return
+        corr, _zone = self._zone(b.index, origins)
+        for v in b.vertices:
+            if v.y < corr[2] or v.y > corr[3]:
+                v.suspect = True
+                v.note = "他の段の領域へ伸びる区間上（所属要確認）"
+
     def _mark_manual(self, b, radius=8):
         for mp in b.manual_points:
             best, bd = None, radius
@@ -246,7 +258,9 @@ class Engine:
 
     def reset_lines(self, b, only_auto=False):
         vs = b.vertices
-        b.line_zero = b.y0
+        if not (only_auto and b.line_zero_manual):
+            b.line_zero = b.y0
+            b.line_zero_manual = False
         if not (only_auto and b.line_top_manual):
             b.line_top = min((v.y for v in vs), default=b.y0)
             b.line_top_manual = False
