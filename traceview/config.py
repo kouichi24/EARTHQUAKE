@@ -6,7 +6,8 @@ class Params:
     """Tunable analysis parameters (all stored in the project file)."""
 
     work_max_side: int = 4800          # longest side of the analysis image [px]
-    ink_threshold: float = 0.62        # background-normalised gray below this is ink
+    ink_threshold: float = 0.48        # pen core: background-normalised gray below this seeds ink
+    ink_weak_threshold: float = 0.64   # fainter ink connected to pen core is kept (hysteresis)
     min_component_area: int = 40       # drop ink specks smaller than this [px]
     ref_line_min_len_frac: float = 0.12  # horizontal straight runs longer than this fraction of width are reference lines
     ref_line_max_thick: int = 9        # ...and thinner than this [px]
