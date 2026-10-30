@@ -102,6 +102,7 @@ def test_sections_saved_and_in_excel(sheet, tmp_path):
     ws = wb["区間測定"]
     heads = [c.value for c in next(r for r in ws.iter_rows() if r[0].value == "段")]
     assert "波の数" in heads and "平均周期[s]" in heads
-    assert ws.max_row > 9
+    n_sections = sum(len(b.sections) for b in e2.bands)
+    assert n_sections >= 1 and ws.max_row == 8 + n_sections
     e.calibration = Calibration()
     e.section_settings.min_swing_px = 20.0

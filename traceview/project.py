@@ -9,7 +9,7 @@ import numpy as np
 from . import __version__
 from .config import Params
 from .imageio import file_digest
-from .measure import SectionSettings
+from .measure import Calibration, SectionSettings
 from .model import Band, Issue
 from .vertices import Vertex
 
