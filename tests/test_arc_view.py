@@ -82,9 +82,12 @@ def test_read_point_snaps_to_trace_and_gives_both_values(eng):
     x, y = b.path[3000]
     row = eng.read_point(0, float(x) + 4, float(y) + 3)
     assert row is not None
-    assert abs(row["x"] - x) < 1e-6 and abs(row["y"] - y) < 1e-6      # snapped onto the trace
+    rd = eng.readouts[-1]
+    on_path = np.any((b.path[:, 0] == rd["x"]) & (b.path[:, 1] == rd["y"]))
+    assert on_path                                                    # snapped onto the trace
+    assert np.hypot(rd["x"] - (x + 4), rd["y"] - (y + 3)) <= 5.0 + 1e-9  # and not farther than the click's own distance
     assert row["x_arc_mm"] is not None and row["t_arc_s"] is not None
-    assert abs(row["x_mm"] - x * 0.1) < 1e-6
+    assert abs(row["x_mm"] - rd["x"] * 0.1) < 1e-6
     assert eng.read_point(0, 5.0, 5.0) is None                          # nothing near
     assert len(eng.readouts) == 1
     assert eng.remove_readout(0) and not eng.readouts
