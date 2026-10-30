@@ -33,6 +33,7 @@ class Band:
     vertices: list = field(default_factory=list)
     manual_points: list = field(default_factory=list)  # dicts {x, y, kind: moved|added}
     pending: list = field(default_factory=list)        # dicts {type, ox, oy, x, y}
+    sections: list = field(default_factory=list)       # dicts {name, x0, x1} in work px
     line_zero: float = 0.0
     line_top: float = 0.0
     line_bottom: float = 0.0
@@ -54,6 +55,7 @@ class Band:
             vertices=[Vertex.from_dict(v.to_dict()) for v in self.vertices],
             manual_points=copy.deepcopy(self.manual_points),
             pending=copy.deepcopy(self.pending) if with_pending else [],
+            sections=copy.deepcopy(self.sections),
             line_zero=self.line_zero, line_top=self.line_top, line_bottom=self.line_bottom,
             line_top_manual=self.line_top_manual, line_bottom_manual=self.line_bottom_manual,
             line_zero_manual=self.line_zero_manual,
@@ -71,6 +73,7 @@ class Band:
                   "end_x", "complete", "confirmed", "y0"):
             setattr(self, k, snap[k])
         self.line_zero_manual = snap.get("line_zero_manual", False)
+        self.sections = copy.deepcopy(snap.get("sections", []))
         self.issues = copy.deepcopy(snap["issues"])
 
     def push_undo(self, limit):

@@ -9,7 +9,7 @@ import numpy as np
 from . import __version__
 from .config import Params
 from .imageio import file_digest
-from .measure import Calibration
+from .measure import SectionSettings
 from .model import Band, Issue
 from .vertices import Vertex
 
@@ -27,7 +27,7 @@ def _snap_to_json(s):
         vertices=[v.to_dict() for v in s["vertices"]], manual_points=s["manual_points"], pending=s["pending"],
         line_zero=s["line_zero"], line_top=s["line_top"], line_bottom=s["line_bottom"],
         line_top_manual=s["line_top_manual"], line_bottom_manual=s["line_bottom_manual"],
-        line_zero_manual=s.get("line_zero_manual", False),
+        line_zero_manual=s.get("line_zero_manual", False), sections=s.get("sections", []),
         end_x=s["end_x"], complete=s["complete"], confirmed=s["confirmed"], y0=s["y0"],
         issues=[i.to_dict() if hasattr(i, "to_dict") else i for i in s["issues"]],
     )
@@ -39,7 +39,7 @@ def _snap_from_json(d):
         vertices=[Vertex.from_dict(v) for v in d["vertices"]], manual_points=d["manual_points"],
         pending=d["pending"], line_zero=d["line_zero"], line_top=d["line_top"], line_bottom=d["line_bottom"],
         line_top_manual=d["line_top_manual"], line_bottom_manual=d["line_bottom_manual"],
-        line_zero_manual=d.get("line_zero_manual", False),
+        line_zero_manual=d.get("line_zero_manual", False), sections=d.get("sections", []),
         end_x=d["end_x"], complete=d["complete"], confirmed=d["confirmed"], y0=d["y0"],
         issues=[Issue(**i) for i in d["issues"]],
     )
@@ -53,7 +53,7 @@ def save_project(engine, path):
         source=dict(path=engine.src_path, name=os.path.basename(engine.src_path), sha256=engine.digest,
                     page=engine.page, orig_size=list(engine.orig_size)),
         transform=dict(scale=engine.scale, rotation_deg=0.0, note="work = original * scale"),
-        profile=engine.profile_key,
+        profile=engine.profile_key, section_settings=engine.section_settings.to_dict(),
         params=engine.params.to_dict(), calibration=engine.calibration.to_dict(),
         bands=[],
     )
@@ -87,6 +87,7 @@ def load_project(engine, path, source_path=None, progress=lambda *a: None):
     engine.params = Params.from_dict(doc.get("params"))
     engine.open(src, doc["source"]["page"], progress)
     engine.profile_key = doc.get("profile", "generic")
+    engine.section_settings = SectionSettings.from_dict(doc.get("section_settings"))
     engine.calibration = Calibration.from_dict(doc.get("calibration"))
     engine.bands = []
     for d in doc["bands"]:

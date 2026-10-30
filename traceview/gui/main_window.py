@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QPointF, QSettings, Qt, QThread, QTimer, Sig
 from PySide6.QtGui import QAction, QBrush, QColor, QImage, QKeySequence, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGraphicsEllipseItem, QGraphicsPixmapItem, QGraphicsScene, QGroupBox,
+                               QGraphicsEllipseItem, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGroupBox,
                                QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
                                QMainWindow, QMessageBox, QProgressDialog, QPushButton, QSlider,
                                QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar,
@@ -19,7 +19,7 @@ from .. import __version__
 from ..engine import Engine, EngineError
 from ..excel_out import PendingEditsError, export_xlsx
 from ..imageio import page_count
-from ..measure import Calibration
+from ..measure import COUNT_MODES, Calibration
 from ..profiles import PROFILES, get as get_profile
 from ..project import SourceMismatch, load_project, save_project
 from ..svg_out import export_svg
@@ -93,6 +93,9 @@ class MainWindow(QMainWindow):
         self.view.sceneClicked.connect(self.on_scene_clicked)
         self.view.cursorMoved.connect(self._on_cursor)
         self.view.zoomChanged.connect(self.apply_visibility)
+        self.view.dragMoved.connect(self._section_drag_preview)
+        self.view.dragFinished.connect(self._section_drag_done)
+        self.section_preview = None
         self._update_enabled()
         self._set_state("読込", "ファイル未選択")
 
@@ -149,7 +152,9 @@ class MainWindow(QMainWindow):
                                "取り逃した先端をクリックして追加")
         self.t_origin = self._act("起点を指定", lambda: self.set_tool("origin"), "O", True,
                                   "自動検出に失敗した段の起点をクリックして指定")
-        for a in (self.t_select, self.t_add, self.t_origin):
+        self.t_section = self._act("区間を指定", lambda: self.set_tool("section"), "R", True,
+                                   "画像上で横にドラッグして、測定する範囲（区間）を指定")
+        for a in (self.t_select, self.t_add, self.t_origin, self.t_section):
             tb2.addAction(a)
         tb2.addSeparator()
         self.a_apply = self._act("再追跡を適用", self.action_apply, "Ctrl+Return")
@@ -255,6 +260,56 @@ class MainWindow(QMainWindow):
         gl.addRow(bb)
         vl.addWidget(g)
         self.tabs.addTab(vw, "頂点")
+        # sections tab
+        sw = QWidget()
+        sl = QVBoxLayout(sw)
+        sl.addWidget(QLabel("「区間を指定」(R)で画像上を横にドラッグすると、選択中の段に区間が追加されます。"))
+        self.sec_table = QTableWidget(0, 12)
+        self.sec_table.setHorizontalHeaderLabels(["区間", "X開始", "X終了", "長さ", "最大", "最小", "上下幅",
+                                                  "波の数", "平均周期", "周波数", "除外", "状態"])
+        self.sec_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.sec_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.sec_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.sec_table.itemSelectionChanged.connect(self.on_section_row)
+        sl.addWidget(self.sec_table, 1)
+        gs = QGroupBox("区間を数値で追加（元画像のpx）")
+        gsl = QFormLayout(gs)
+        self.sec_x0 = QDoubleSpinBox()
+        self.sec_x1 = QDoubleSpinBox()
+        for sp in (self.sec_x0, self.sec_x1):
+            sp.setRange(0, 200000)
+            sp.setDecimals(0)
+        gsl.addRow("X開始", self.sec_x0)
+        gsl.addRow("X終了", self.sec_x1)
+        self.sec_all = QCheckBox("全段に同じ範囲を追加する")
+        gsl.addRow(self.sec_all)
+        rowb = QHBoxLayout()
+        b1 = QPushButton("区間を追加")
+        b1.clicked.connect(self.action_add_section_numeric)
+        b2 = QPushButton("選択した区間を削除")
+        b2.clicked.connect(self.action_remove_section)
+        rowb.addWidget(b1)
+        rowb.addWidget(b2)
+        gsl.addRow(rowb)
+        sl.addWidget(gs)
+        gset = QGroupBox("数え方の設定")
+        gsetl = QFormLayout(gset)
+        self.sec_swing = QDoubleSpinBox()
+        self.sec_swing.setRange(0, 100000)
+        self.sec_swing.setDecimals(1)
+        self.sec_swing.setToolTip("隣の頂点との振れ幅がこれ未満の小さな揺れは、波として数えません（元画像のpx）")
+        self.sec_mode = QComboBox()
+        for k, v in COUNT_MODES.items():
+            self.sec_mode.addItem(v, k)
+        self.sec_swing.valueChanged.connect(self.on_section_settings)
+        self.sec_mode.currentIndexChanged.connect(self.on_section_settings)
+        gsetl.addRow("数えない小さな揺れ [px]", self.sec_swing)
+        gsetl.addRow("波の数え方", self.sec_mode)
+        sl.addWidget(gset)
+        self.sec_note = QLabel("")
+        self.sec_note.setWordWrap(True)
+        sl.addWidget(self.sec_note)
+        self.tabs.addTab(sw, "区間")
         # issues tab
         iw = QWidget()
         il = QVBoxLayout(iw)
@@ -298,10 +353,15 @@ class MainWindow(QMainWindow):
         bx.clicked.connect(lambda: self.start_calibration("x"))
         by = QPushButton("定規上の2点でY方向を設定")
         by.clicked.connect(lambda: self.start_calibration("y"))
+        bt = QPushButton("時刻の刻み2点で時間を設定（刻みの間隔[s]を入力）")
+        bt.clicked.connect(lambda: self.start_calibration("t"))
         ba = QPushButton("換算条件を適用")
         ba.clicked.connect(self.action_apply_calibration)
         cl.addRow(bx)
         cl.addRow(by)
+        cl.addRow(bt)
+        self.c_tick_label = QLabel("")
+        cl.addRow(self.c_tick_label)
         cl.addRow(ba)
         note = QLabel("未設定（0）のときは画像座標のpxで表示します。時間は紙送り速度が設定されたときだけ出力します。")
         note.setWordWrap(True)
@@ -351,7 +411,7 @@ class MainWindow(QMainWindow):
         self.profile_combo.setEnabled(has_img)
         self._sync_profile_combo()
         for a in (self.a_save, self.a_xlsx, self.a_svg, self.a_undo, self.a_redo, self.a_reset, self.a_apply,
-                  self.a_cancel_pending, self.t_add, self.t_origin, self.a_play, self.a_prev_v, self.a_next_v,
+                  self.a_cancel_pending, self.t_add, self.t_origin, self.t_section, self.a_play, self.a_prev_v, self.a_next_v,
                   self.a_zoom_sel):
             a.setEnabled(has_b)
 
@@ -734,7 +794,8 @@ class MainWindow(QMainWindow):
         d = self.band_items.pop(bi, None)
         if not d:
             return
-        for it in [d["path"], *d["inferred"], *d["vertices"], *d["lines"].values(), *d["issues"], *d["pending"]]:
+        for it in [d["path"], *d["inferred"], *d["vertices"], *d["lines"].values(), *d["issues"], *d["pending"],
+                   *d.get("sections", [])]:
             if it is not None and it.scene() is self.scene:
                 self.scene.removeItem(it)
 
@@ -782,6 +843,27 @@ class MainWindow(QMainWindow):
             m.setData(0, iss.kind)
             self.scene.addItem(m)
             d["issues"].append(m)
+        d["sections"] = []
+        if b.sections:
+            ya, yb = self._section_y_range(bi)
+            for sec in b.sections:
+                rc = QGraphicsRectItem(sec["x0"], ya, sec["x1"] - sec["x0"], yb - ya)
+                col = QColor(b.color)
+                col.setAlpha(36)
+                rc.setBrush(QBrush(col))
+                pen = QPen(QColor(b.color), 1, Qt.DashDotLine)
+                pen.setCosmetic(True)
+                rc.setPen(pen)
+                rc.setZValue(6)
+                rc.setToolTip(f"{b.name} {sec['name']}")
+                self.scene.addItem(rc)
+                lbl = QGraphicsSimpleTextItem(sec["name"])
+                lbl.setBrush(QBrush(QColor(b.color)))
+                lbl.setFlag(QGraphicsSimpleTextItem.ItemIgnoresTransformations, True)
+                lbl.setPos(sec["x0"] + 4, ya + 4)
+                lbl.setZValue(7)
+                self.scene.addItem(lbl)
+                d["sections"] += [rc, lbl]
         for p in b.pending:
             ox, oy = p.get("ox"), p.get("oy")
             m = QGraphicsEllipseItem(-7, -7, 14, 14)
@@ -826,17 +908,22 @@ class MainWindow(QMainWindow):
                 it.setVisible(self.cb_issues.isChecked() and vis_band and (zoomed or it.data(0) != "ambiguous"))
             for it in d["pending"]:
                 it.setVisible(vis_band)
+            for it in d.get("sections", []):
+                it.setVisible(vis_band)
 
     def set_tool(self, tool):
         self.tool = tool
-        for name, act in (("select", self.t_select), ("add", self.t_add), ("origin", self.t_origin)):
+        for name, act in (("select", self.t_select), ("add", self.t_add), ("origin", self.t_origin),
+                          ("section", self.t_section)):
             act.setChecked(name == tool)
         self.view.click_tool = tool in ("add", "origin", "calib")
+        self.view.drag_tool = tool == "section"
         for d in self.band_items.values():
             for it in d["vertices"]:
                 it.set_editable(tool == "select")
         hint = {"select": "頂点をドラッグして移動／測定線は上下にドラッグ", "add": "追加する頂点（先端）をクリック",
-                "origin": "選択中の段の起点（波形の左端）をクリック", "calib": "定規上の1点目、2点目の順にクリック"}[tool]
+                "origin": "選択中の段の起点（波形の左端）をクリック", "calib": "1点目、2点目の順にクリック",
+                "section": "測定したい範囲を横にドラッグ（選択中の段に追加）"}[tool]
         self.statusBar().showMessage(hint, 6000)
 
     # ------------------------------------------------------------ panels
@@ -856,6 +943,7 @@ class MainWindow(QMainWindow):
         self.update_measure_table()
         self.update_vertex_table()
         self.update_issue_list()
+        self.update_section_table()
         b = self.current_band()
         self.cb_confirm.blockSignals(True)
         self.cb_confirm.setChecked(bool(b and b.confirmed))
@@ -1159,6 +1247,123 @@ class MainWindow(QMainWindow):
         self.update_measure_table()
         self._update_review_label()
 
+    # ------------------------------------------------------------ sections
+    def _section_y_range(self, bi):
+        e = self.engine
+        origins = [bd.origin for bd in e.bands]
+        if len(origins) >= 2:
+            corr, _z = e._zone(bi, origins)
+            return corr[0], corr[1]
+        b = e.bands[bi]
+        return b.line_zero - 300, b.line_zero + 300
+
+    def _section_drag_preview(self, a, b):
+        bd = self.current_band()
+        if bd is None:
+            return
+        y0, y1 = self._section_y_range(self.sel_band)
+        if self.section_preview is None:
+            it = QGraphicsRectItem()
+            it.setBrush(QBrush(QColor(255, 235, 59, 60)))
+            it.setPen(QPen(QColor("#ffeb3b"), 1, Qt.DashLine))
+            it.setZValue(8)
+            self.scene.addItem(it)
+            self.section_preview = it
+        self.section_preview.setRect(min(a.x(), b.x()), y0, abs(b.x() - a.x()), y1 - y0)
+
+    def _section_drag_done(self, a, b):
+        if self.section_preview is not None:
+            self.scene.removeItem(self.section_preview)
+            self.section_preview = None
+        bands = range(len(self.engine.bands)) if self.sec_all.isChecked() else [self.sel_band]
+        self._add_sections(bands, a.x(), b.x())
+
+    def _add_sections(self, bands, x0, x1):
+        try:
+            for bi in bands:
+                self.engine.add_section(bi, x0, x1)
+        except EngineError as ex:
+            self._show_error(str(ex))
+            return
+        self.dirty = True
+        for bi in bands:
+            self._build_band_items(bi)
+        self.apply_visibility()
+        self.refresh_panels()
+        self.tabs.setCurrentIndex(2)
+        self._info("区間を追加しました")
+
+    def action_add_section_numeric(self):
+        if not self.engine.bands:
+            return
+        s = self.engine.scale
+        bands = range(len(self.engine.bands)) if self.sec_all.isChecked() else [self.sel_band]
+        self._add_sections(bands, self.sec_x0.value() * s, self.sec_x1.value() * s)
+
+    def action_remove_section(self):
+        rows = self.sec_table.selectionModel().selectedRows()
+        if rows and self.engine.remove_section(self.sel_band, rows[0].row()):
+            self.dirty = True
+            self._build_band_items(self.sel_band)
+            self.apply_visibility()
+            self.refresh_panels()
+
+    def on_section_settings(self, *_):
+        ss = self.engine.section_settings
+        ss.min_swing_px = self.sec_swing.value()
+        ss.count_mode = self.sec_mode.currentData()
+        self.dirty = True
+        self.update_section_table()
+
+    def on_section_row(self):
+        rows = self.sec_table.selectionModel().selectedRows()
+        b = self.current_band()
+        if rows and b is not None and rows[0].row() < len(b.sections):
+            sec = b.sections[rows[0].row()]
+            self.view.center_on_point((sec["x0"] + sec["x1"]) / 2, b.line_zero, zoom=None)
+            self.view.centerOn((sec["x0"] + sec["x1"]) / 2, b.line_zero)
+
+    def update_section_table(self):
+        e = self.engine
+        b = self.current_band()
+        t = self.sec_table
+        t.blockSignals(True)
+        t.setRowCount(0)
+        self.sec_swing.blockSignals(True)
+        self.sec_mode.blockSignals(True)
+        self.sec_swing.setValue(e.section_settings.min_swing_px)
+        self.sec_mode.setCurrentIndex(max(0, self.sec_mode.findData(e.section_settings.count_mode)))
+        self.sec_swing.blockSignals(False)
+        self.sec_mode.blockSignals(False)
+        if b is None:
+            t.blockSignals(False)
+            return
+        unit = e.calibration.unit_y()
+        sp = e.calibration.seconds_per_orig_px()
+        t.setRowCount(len(b.sections))
+
+        def f(v, n=1, suffix=""):
+            return "—" if v is None else f"{v:.{n}f}{suffix}"
+        any_doubt = False
+        for i in range(len(b.sections)):
+            r = e.section_result(self.sel_band, i)
+            period = f(r["period_s"], 3, " s") if r["period_s"] is not None else f(r["period_px"], 1, " px")
+            doubt = r["n_excluded"] or r["beyond_trace"] or r["issues"]["untracked_end"]
+            any_doubt = any_doubt or bool(doubt)
+            cells = [r["name"], f(r["x0"], 0), f(r["x1"], 0),
+                     f(r["length_s"], 2, " s") if r["length_s"] is not None else f(r["length_px"], 0, " px"),
+                     f(r.get("max_value"), 2), f(r.get("min_value"), 2), f(r.get("span"), 2),
+                     f(r["waves"], 1 if r["waves"] % 1 else 0), period,
+                     f(r["freq_hz"], 3, " Hz") if r["freq_hz"] is not None else "—",
+                     str(r["n_excluded"]), r["status"] + ("・追跡外を含む" if r["beyond_trace"] else "")]
+            for c, txt in enumerate(cells):
+                t.setItem(i, c, QTableWidgetItem(txt))
+        t.resizeColumnsToContents()
+        t.blockSignals(False)
+        self.sec_note.setText(
+            f"値の単位: {unit}。時間換算: " + (f"{sp:.5f} 秒/px" if sp > 0 else "未設定（周期はpx表示。「校正」タブで設定）")
+            + "。「確認済み」以外の値は候補です。" + (" 区間内に除外した頂点／追跡できていない部分があります。" if any_doubt else ""))
+
     # ---------------------------------------------------------- calibration
     def _load_calibration_fields(self):
         c = self.engine.calibration
@@ -1168,6 +1373,7 @@ class MainWindow(QMainWindow):
         self.c_amp.setValue(c.amplitude_factor)
         self.c_unit.setCurrentText(c.amplitude_unit)
         self.c_arm.setValue(c.arm_length_mm)
+        self._show_tick_label()
         self.c_arc.setCurrentIndex(0 if c.arc_sign >= 0 else 1)
 
     def action_apply_calibration(self):
@@ -1181,7 +1387,13 @@ class MainWindow(QMainWindow):
         c.arc_sign = int(self.c_arc.currentData())
         self.dirty = True
         self.refresh_panels()
+        self._show_tick_label()
         self._info("換算条件を適用しました（作業ファイルとExcelに保存されます）")
+
+    def _show_tick_label(self):
+        c = self.engine.calibration
+        sp = c.seconds_per_orig_px()
+        self.c_tick_label.setText(f"現在の時間換算: {sp:.5f} 秒/px（{1 / sp:.2f} px/秒）" if sp > 0 else "現在の時間換算: 未設定（時間は出力しません）")
 
     def start_calibration(self, axis):
         self.calib_axis = axis
@@ -1190,11 +1402,20 @@ class MainWindow(QMainWindow):
 
     def _finish_calibration(self):
         (x1, y1), (x2, y2) = self.calib_pts
-        d_work = abs(x2 - x1) if self.calib_axis == "x" else abs(y2 - y1)
+        d_work = abs(y2 - y1) if self.calib_axis == "y" else abs(x2 - x1)
         d_px = d_work / self.engine.scale
         self.set_tool("select")
         if d_px < 5:
             self._info("2点の距離が近すぎます")
+            return
+        if self.calib_axis == "t":
+            sec, ok = (5.0, True) if self.sync_mode else QInputDialog.getDouble(
+                self, "時間の設定", f"選んだ2点の刻みの間の時間 [秒]（画像上 {d_px:.1f}px）", 10.0, 0.0001, 1e7, 4)
+            if ok and sec > 0:
+                self.engine.calibration.seconds_per_px_x = sec / d_px
+                self.dirty = True
+                self.refresh_panels()
+                self._info(f"時間を設定しました（{sec / d_px:.5f} 秒/px）")
             return
         mm, ok = (50.0, True) if self.sync_mode else QInputDialog.getDouble(
             self, "校正", f"2点間の実距離 [mm]（画像上 {d_px:.1f}px）", 100.0, 0.001, 100000, 3)

@@ -9,6 +9,8 @@ class ImageView(QGraphicsView):
     sceneClicked = Signal(QPointF)
     cursorMoved = Signal(QPointF)
     zoomChanged = Signal()
+    dragMoved = Signal(QPointF, QPointF)
+    dragFinished = Signal(QPointF, QPointF)
 
     def __init__(self, scene):
         super().__init__(scene)
@@ -19,6 +21,8 @@ class ImageView(QGraphicsView):
         self.setBackgroundBrush(QBrush(QColor("#2b2b2b")))
         self.setMouseTracking(True)
         self.click_tool = False      # when True a left click is reported instead of panning
+        self.drag_tool = False       # when True a left drag is reported (section tool) instead of panning
+        self._drag_start = None
         self._press_pos = None
 
     def wheelEvent(self, ev):
@@ -41,6 +45,10 @@ class ImageView(QGraphicsView):
 
     def mousePressEvent(self, ev):
         self._press_pos = ev.position()
+        if self.drag_tool and ev.button() == Qt.LeftButton:
+            self.setDragMode(QGraphicsView.NoDrag)
+            self._drag_start = self.mapToScene(ev.position().toPoint())
+            return
         if self.click_tool and ev.button() == Qt.LeftButton:
             item = self.itemAt(ev.position().toPoint())
             if item is None or not (item.flags() & item.GraphicsItemFlag.ItemIsMovable):
@@ -48,6 +56,12 @@ class ImageView(QGraphicsView):
         super().mousePressEvent(ev)
 
     def mouseReleaseEvent(self, ev):
+        if self.drag_tool and self._drag_start is not None and ev.button() == Qt.LeftButton:
+            a, b = self._drag_start, self.mapToScene(ev.position().toPoint())
+            self._drag_start = None
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            self.dragFinished.emit(a, b)
+            return
         was_click = (self._press_pos is not None and ev.button() == Qt.LeftButton and
                      (ev.position() - self._press_pos).manhattanLength() < 4)
         super().mouseReleaseEvent(ev)
@@ -57,6 +71,9 @@ class ImageView(QGraphicsView):
 
     def mouseMoveEvent(self, ev):
         self.cursorMoved.emit(self.mapToScene(ev.position().toPoint()))
+        if self.drag_tool and self._drag_start is not None:
+            self.dragMoved.emit(self._drag_start, self.mapToScene(ev.position().toPoint()))
+            return
         super().mouseMoveEvent(ev)
 
 

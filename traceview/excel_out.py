@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from . import __version__
-from .measure import arc_corrected_x_mm
+from .measure import COUNT_MODES, arc_corrected_x_mm
 from .profiles import get as get_profile
 
 SRC_LABEL = {"auto": "自動取得", "manual": "手動頂点", "retrace": "再追跡"}
@@ -180,6 +180,60 @@ def export_xlsx(engine, out_path, include_all_points=False):
                 row3 += _arc_cols(cal, b, v.x, v.y, inv)
             ws3.append(row3)
     ws3.freeze_panes = "A2"
+
+    # ---- sheet: section measurements (range -> amplitude, waves, period)
+    wsx = wb.create_sheet("区間測定")
+    ss = engine.section_settings
+    sp = cal.seconds_per_orig_px()
+    wsx["A1"] = "区間測定（指定した範囲の振れ幅・波の数・周期）"
+    wsx["A1"].font = Font(bold=True, size=13)
+    notes = [
+        f"波の数の数え方: {COUNT_MODES.get(ss.count_mode, ss.count_mode)}。隣の頂点との振れ幅が {ss.min_swing_px:g}px 未満の小さな揺れは数えない",
+        "平均周期 = 最初の山から最後の山までの距離 ÷ (山の数−1)。山が2個未満のときは出さない",
+        "時間は、校正（紙送り速度、または刻み2点）がある場合だけ出力。未設定のときは px のみ",
+        "所属要確認・推定接続の区間上の頂点は、最大・最小と波の数から除外（除外した数を列に表示）",
+        "「状態」が「確認済み」以外の値は候補です",
+    ]
+    for i, t in enumerate(notes):
+        wsx.cell(2 + i, 1, t)
+    hx = ["段", "区間名", "状態", "X開始[px]", "X終了[px]", "長さ[px]", "長さ[mm]", "長さ[s]",
+          f"最大値({unit})", "最大値X[px]", "最大値Y[px]", f"最小値({unit})", "最小値X[px]", "最小値Y[px]",
+          f"上下幅({unit})", "山の数", "谷の数", "波の数", "平均周期[px]", "周期の最小[px]", "周期の最大[px]",
+          "平均周期[mm]", "平均周期[s]", "周波数[Hz]", "使った頂点数", "除外した頂点数",
+          "区間内の曖昧さ", "区間内の逸脱", "末端未追跡にかかる", "備考"]
+    r0x = 2 + len(notes) + 1
+    for c, h in enumerate(hx, 1):
+        cell = wsx.cell(r0x, c, h)
+        cell.font = bold
+        cell.fill = hdr_fill
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    rx = r0x + 1
+    for b in engine.bands:
+        for si in range(len(b.sections)):
+            r = engine.section_result(b.index, si)
+            remark = []
+            if r["n_excluded"]:
+                remark.append("所属要確認・推定接続の頂点を除外")
+            if r["beyond_trace"]:
+                remark.append("追跡できていない部分を含む")
+            if r["issues"]["untracked_end"]:
+                remark.append("末端未追跡の位置を含む")
+            row = [r["band"], r["name"], r["status"], r["x0"], r["x1"], r["length_px"], r["length_mm"], r["length_s"],
+                   r.get("max_value"), r.get("max_x"), r.get("max_y"), r.get("min_value"), r.get("min_x"),
+                   r.get("min_y"), r.get("span"), r["peaks"], r["valleys"], r["waves"], r["period_px"],
+                   r["period_min_px"], r["period_max_px"], r["period_mm"], r["period_s"], r["freq_hz"],
+                   r["n_vertices"], r["n_excluded"], r["issues"]["ambiguous"], r["issues"]["excursion"],
+                   "はい" if r["beyond_trace"] else "", " / ".join(remark)]
+            for c, v in enumerate(row, 1):
+                wsx.cell(rx, c, round(v, 3) if isinstance(v, float) else v)
+            rx += 1
+    if rx == r0x + 1:
+        wsx.cell(rx, 1, "（区間が指定されていません）")
+    wsx.freeze_panes = wsx.cell(r0x + 1, 3)
+    for c in range(1, len(hx) + 1):
+        wsx.column_dimensions[get_column_letter(c)].width = 13
+    wsx.column_dimensions["A"].width = 10
+    wsx.column_dimensions["C"].width = 22
 
     # ---- sheet 4: issues
     ws4 = wb.create_sheet("要確認")

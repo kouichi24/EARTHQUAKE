@@ -10,7 +10,7 @@ from . import __version__
 from .config import Params
 from .graph import add_virtual_edges, bridge_gaps, build_graph, skeleton_of
 from .imageio import file_digest, load_image, make_work_image, page_count
-from .measure import Calibration
+from .measure import Calibration, SectionSettings, section_stats
 from .model import BAND_COLORS, BAND_NAMES, Band, Issue
 from .preprocess import prepare
 from .tracer import Walker
@@ -40,6 +40,7 @@ class Engine:
         self.calibration = Calibration()
         self.orig_size = (0, 0)
         self.profile_key = "generic"
+        self.section_settings = SectionSettings()
 
     # ------------------------------------------------------------------ open
     def open(self, path, page=0, progress=_noop):
@@ -532,6 +533,35 @@ class Engine:
         self._finish_band(b, newpath, rev, [], inf, b.end_x)
         offtxt = f"（画像の線へ{off:.1f}px補正）" if off and off > 0.5 else ""
         return True, f"頂点を追加し、先端まで到達して折り返す経路を再計算しました{offtxt}"
+
+    # ----------------------------------------------------------- sections
+    def add_section(self, bi, x0_work, x1_work, name=None):
+        """Add a measuring section (a range along x) to a band. Undoable."""
+        b = self.bands[bi]
+        lo, hi = sorted((float(x0_work), float(x1_work)))
+        if hi - lo < 5:
+            raise EngineError("区間が短すぎます")
+        b.push_undo(self.params.undo_limit)
+        b.sections.append(dict(name=name or f"区間{len(b.sections) + 1}", x0=lo, x1=hi))
+        b.confirmed = False
+        return b.sections[-1]
+
+    def remove_section(self, bi, si):
+        b = self.bands[bi]
+        if 0 <= si < len(b.sections):
+            b.push_undo(self.params.undo_limit)
+            del b.sections[si]
+            return True
+        return False
+
+    def section_result(self, bi, si):
+        b = self.bands[bi]
+        sec = b.sections[si]
+        r = section_stats(b, sec["x0"], sec["x1"], self.scale, self.calibration, self.section_settings)
+        r["name"] = sec["name"]
+        r["band"] = b.name
+        r["status"] = self.value_status(b)
+        return r
 
     # ------------------------------------------------------------ undo / redo
     def undo(self, bi):
