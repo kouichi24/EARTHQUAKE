@@ -3,6 +3,8 @@ rem TraceView: build a distributable folder (dist\TraceView\TraceView.exe). Run 
 chcp 65001 >nul
 cd /d "%~dp0"
 set PY=python
+where py >nul 2>&1 && set PY=py -3
+set PY=python
 where py >nul 2>nul && set PY=py
 echo [1/4] 仮想環境を作成します
 %PY% -m venv .venv || goto :error
