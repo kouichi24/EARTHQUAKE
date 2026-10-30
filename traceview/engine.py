@@ -10,7 +10,7 @@ from . import __version__
 from .config import Params
 from .graph import add_virtual_edges, bridge_gaps, build_graph, skeleton_of
 from .imageio import file_digest, load_image, make_work_image, page_count
-from .measure import Calibration, SectionSettings, section_stats
+from .measure import Calibration, SectionSettings, arc_active, corrected_x_work, section_stats
 from .model import BAND_COLORS, BAND_NAMES, Band, Issue
 from .preprocess import prepare
 from .tracer import Walker
@@ -41,6 +41,7 @@ class Engine:
         self.orig_size = (0, 0)
         self.profile_key = "generic"
         self.section_settings = SectionSettings()
+        self.readouts = []          # points read from the trace: dicts {band, x, y} (work px)
 
     # ------------------------------------------------------------------ open
     def open(self, path, page=0, progress=_noop):
@@ -533,6 +534,43 @@ class Engine:
         self._finish_band(b, newpath, rev, [], inf, b.end_x)
         offtxt = f"（画像の線へ{off:.1f}px補正）" if off and off > 0.5 else ""
         return True, f"頂点を追加し、先端まで到達して折り返す経路を再計算しました{offtxt}"
+
+    # ------------------------------------------------------------ read values
+    def read_point(self, bi, x, y, max_dist=40):
+        """Snap to the nearest point of the traced line of band `bi` and remember it. Returns the row or None."""
+        b = self.bands[bi]
+        if len(b.path) == 0:
+            return None
+        d = np.hypot(b.path[:, 0] - x, b.path[:, 1] - y)
+        j = int(np.argmin(d))
+        if d[j] > max_dist:
+            return None
+        rd = dict(band=bi, x=float(b.path[j][0]), y=float(b.path[j][1]))
+        self.readouts.append(rd)
+        return self.readout_row(rd)
+
+    def readout_row(self, rd):
+        """Raw and arc-corrected values of one read point (positions in original px)."""
+        b = self.bands[rd["band"]]
+        cal, inv = self.calibration, 1.0 / self.scale
+        sp = cal.seconds_per_orig_px()
+        amp_px = (b.line_zero - rd["y"]) * inv
+        row = dict(band=b.name, x=rd["x"] * inv, y=rd["y"] * inv, amp=cal.to_y_units(amp_px),
+                   x_mm=rd["x"] * inv * cal.mm_per_px_x if cal.mm_per_px_x > 0 else None,
+                   t_s=(rd["x"] - b.origin[0]) * inv * sp if sp > 0 else None,
+                   x_arc_mm=None, t_arc_s=None)
+        if arc_active(cal):
+            xc = corrected_x_work(rd["x"], rd["y"], b.line_zero, self.scale, cal)
+            row["x_arc_mm"] = xc * inv * cal.mm_per_px_x
+            if sp > 0:
+                row["t_arc_s"] = (xc - b.origin[0]) * inv * sp
+        return row
+
+    def remove_readout(self, i):
+        if 0 <= i < len(self.readouts):
+            del self.readouts[i]
+            return True
+        return False
 
     # ----------------------------------------------------------- sections
     def add_section(self, bi, x0_work, x1_work, name=None):

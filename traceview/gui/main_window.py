@@ -19,7 +19,7 @@ from .. import __version__
 from ..engine import Engine, EngineError
 from ..excel_out import PendingEditsError, export_xlsx
 from ..imageio import page_count
-from ..measure import COUNT_MODES, Calibration
+from ..measure import COUNT_MODES, Calibration, arc_active, corrected_path, corrected_x_work
 from ..profiles import PROFILES, get as get_profile
 from ..project import SourceMismatch, load_project, save_project
 from ..svg_out import export_svg
@@ -154,7 +154,9 @@ class MainWindow(QMainWindow):
                                   "自動検出に失敗した段の起点をクリックして指定")
         self.t_section = self._act("区間を指定", lambda: self.set_tool("section"), "R", True,
                                    "画像上で横にドラッグして、測定する範囲（区間）を指定")
-        for a in (self.t_select, self.t_add, self.t_origin, self.t_section):
+        self.t_read = self._act("値を読む", lambda: self.set_tool("read"), "V", True,
+                                "トレース上をクリックして、その点の値（補正前・円弧補正後）を読み取る")
+        for a in (self.t_select, self.t_add, self.t_origin, self.t_section, self.t_read):
             tb2.addAction(a)
         tb2.addSeparator()
         self.a_apply = self._act("再追跡を適用", self.action_apply, "Ctrl+Return")
@@ -184,9 +186,12 @@ class MainWindow(QMainWindow):
         self.cb_vertices.setChecked(True)
         self.cb_lines = QCheckBox("測定線")
         self.cb_lines.setChecked(True)
+        self.cb_arc = QCheckBox("円弧補正後")
+        self.cb_arc.setChecked(True)
+        self.cb_arc.setToolTip("円弧補正後のトレース（点線）を重ねて表示（校正タブでアーム長とX・Y校正を設定したとき）")
         self.cb_issues = QCheckBox("要確認印")
         self.cb_issues.setChecked(True)
-        for cb in (self.cb_image, self.cb_trace, self.cb_vertices, self.cb_lines, self.cb_issues):
+        for cb in (self.cb_image, self.cb_trace, self.cb_arc, self.cb_vertices, self.cb_lines, self.cb_issues):
             cb.toggled.connect(self.apply_visibility)
             tb3.addWidget(cb)
         tb3.addSeparator()
@@ -239,8 +244,8 @@ class MainWindow(QMainWindow):
         # vertices tab
         vw = QWidget()
         vl = QVBoxLayout(vw)
-        self.v_table = QTableWidget(0, 7)
-        self.v_table.setHorizontalHeaderLabels(["#", "X", "Y", "山/谷", "振幅", "由来", "折返し"])
+        self.v_table = QTableWidget(0, 8)
+        self.v_table.setHorizontalHeaderLabels(["#", "X", "Y", "山/谷", "振幅", "由来", "折返し", "補正後X[mm]"])
         self.v_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.v_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.v_table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -264,9 +269,9 @@ class MainWindow(QMainWindow):
         sw = QWidget()
         sl = QVBoxLayout(sw)
         sl.addWidget(QLabel("「区間を指定」(R)で画像上を横にドラッグすると、選択中の段に区間が追加されます。"))
-        self.sec_table = QTableWidget(0, 12)
+        self.sec_table = QTableWidget(0, 13)
         self.sec_table.setHorizontalHeaderLabels(["区間", "X開始", "X終了", "長さ", "最大", "最小", "上下幅",
-                                                  "波の数", "平均周期", "周波数", "除外", "状態"])
+                                                  "波の数", "平均周期", "補正後周期", "周波数", "除外", "状態"])
         self.sec_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.sec_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.sec_table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -310,6 +315,23 @@ class MainWindow(QMainWindow):
         self.sec_note.setWordWrap(True)
         sl.addWidget(self.sec_note)
         self.tabs.addTab(sw, "区間")
+        # read tab
+        rw = QWidget()
+        rl = QVBoxLayout(rw)
+        rl.addWidget(QLabel("「値を読む」(V)でトレース上をクリックすると、その点の値を補正前・円弧補正後で並べて記録します。"))
+        self.read_table = QTableWidget(0, 8)
+        self.read_table.setHorizontalHeaderLabels(["段", "X[px]", "Y[px]", "振幅", "X[mm]", "時間[s]",
+                                                   "補正後X[mm]", "補正後時間[s]"])
+        self.read_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.read_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        rl.addWidget(self.read_table, 1)
+        rb = QPushButton("選んだ読取点を削除")
+        rb.clicked.connect(self.action_remove_readout)
+        rl.addWidget(rb)
+        self.read_note = QLabel("")
+        self.read_note.setWordWrap(True)
+        rl.addWidget(self.read_note)
+        self.tabs.addTab(rw, "読取")
         # issues tab
         iw = QWidget()
         il = QVBoxLayout(iw)
@@ -401,7 +423,14 @@ class MainWindow(QMainWindow):
         e = self.engine
         if e.src_path:
             inv = 1 / e.scale
-            self.lbl_cursor.setText(f"X {p.x() * inv:.0f}  Y {p.y() * inv:.0f} px")
+            txt = f"X {p.x() * inv:.0f}  Y {p.y() * inv:.0f} px"
+            b = self.current_band()
+            cal = e.calibration
+            if b is not None and cal.mm_per_px_x > 0:
+                txt += f"  ({p.x() * inv * cal.mm_per_px_x:.1f} mm)"
+            if b is not None:
+                txt += f"  振幅 {cal.to_y_units((b.line_zero - p.y()) * inv):.1f}"
+            self.lbl_cursor.setText(txt)
 
     def _update_enabled(self):
         has_img = self.engine.work is not None
@@ -411,7 +440,7 @@ class MainWindow(QMainWindow):
         self.profile_combo.setEnabled(has_img)
         self._sync_profile_combo()
         for a in (self.a_save, self.a_xlsx, self.a_svg, self.a_undo, self.a_redo, self.a_reset, self.a_apply,
-                  self.a_cancel_pending, self.t_add, self.t_origin, self.t_section, self.a_play, self.a_prev_v, self.a_next_v,
+                  self.a_cancel_pending, self.t_add, self.t_origin, self.t_section, self.t_read, self.a_play, self.a_prev_v, self.a_next_v,
                   self.a_zoom_sel):
             a.setEnabled(has_b)
 
@@ -795,7 +824,7 @@ class MainWindow(QMainWindow):
         if not d:
             return
         for it in [d["path"], *d["inferred"], *d["vertices"], *d["lines"].values(), *d["issues"], *d["pending"],
-                   *d.get("sections", [])]:
+                   *d.get("sections", []), *d.get("arc", []), *d.get("reads", [])]:
             if it is not None and it.scene() is self.scene:
                 self.scene.removeItem(it)
 
@@ -843,6 +872,35 @@ class MainWindow(QMainWindow):
             m.setData(0, iss.kind)
             self.scene.addItem(m)
             d["issues"].append(m)
+        d["arc"] = []
+        cal = e.calibration
+        if arc_active(cal) and len(b.path) > 1:
+            cp = corrected_path(b.path, b.line_zero, e.scale, cal)
+            simp = cv2.approxPolyDP(cp.astype(np.float32).reshape(-1, 1, 2), 0.7, False).reshape(-1, 2)
+            col = QColor(b.color).darker(180)
+            it = make_path_item(polyline_path(simp), col.name(), 1, dashed=True, z=11)
+            it.pen().setStyle(Qt.DotLine)
+            self.scene.addItem(it)
+            d["arc"].append(it)
+        d["reads"] = []
+        for k, rd in enumerate(e.readouts):
+            if rd["band"] != bi:
+                continue
+            m = QGraphicsEllipseItem(-6, -6, 12, 12)
+            m.setPos(rd["x"], rd["y"])
+            m.setBrush(QBrush(QColor(255, 255, 255, 80)))
+            m.setPen(QPen(QColor("#00acc1"), 2))
+            m.setFlag(QGraphicsEllipseItem.ItemIgnoresTransformations, True)
+            m.setZValue(45)
+            m.setToolTip(self._format_readout(e.readout_row(rd)))
+            self.scene.addItem(m)
+            lbl = QGraphicsSimpleTextItem(str(k + 1))
+            lbl.setBrush(QBrush(QColor("#00838f")))
+            lbl.setFlag(QGraphicsSimpleTextItem.ItemIgnoresTransformations, True)
+            lbl.setPos(rd["x"] + 6, rd["y"] - 18)
+            lbl.setZValue(45)
+            self.scene.addItem(lbl)
+            d["reads"] += [m, lbl]
         d["sections"] = []
         if b.sections:
             ya, yb = self._section_y_range(bi)
@@ -910,20 +968,25 @@ class MainWindow(QMainWindow):
                 it.setVisible(vis_band)
             for it in d.get("sections", []):
                 it.setVisible(vis_band)
+            for it in d.get("arc", []):
+                it.setVisible(self.cb_arc.isChecked() and tr)
+            for it in d.get("reads", []):
+                it.setVisible(vis_band)
 
     def set_tool(self, tool):
         self.tool = tool
         for name, act in (("select", self.t_select), ("add", self.t_add), ("origin", self.t_origin),
-                          ("section", self.t_section)):
+                          ("section", self.t_section), ("read", self.t_read)):
             act.setChecked(name == tool)
-        self.view.click_tool = tool in ("add", "origin", "calib")
+        self.view.click_tool = tool in ("add", "origin", "calib", "read")
         self.view.drag_tool = tool == "section"
         for d in self.band_items.values():
             for it in d["vertices"]:
                 it.set_editable(tool == "select")
         hint = {"select": "頂点をドラッグして移動／測定線は上下にドラッグ", "add": "追加する頂点（先端）をクリック",
                 "origin": "選択中の段の起点（波形の左端）をクリック", "calib": "1点目、2点目の順にクリック",
-                "section": "測定したい範囲を横にドラッグ（選択中の段に追加）"}[tool]
+                "section": "測定したい範囲を横にドラッグ（選択中の段に追加）",
+                "read": "値を読みたい点をトレース上でクリック（選択中の段）"}[tool]
         self.statusBar().showMessage(hint, 6000)
 
     # ------------------------------------------------------------ panels
@@ -944,6 +1007,7 @@ class MainWindow(QMainWindow):
         self.update_vertex_table()
         self.update_issue_list()
         self.update_section_table()
+        self.update_read_table()
         b = self.current_band()
         self.cb_confirm.blockSignals(True)
         self.cb_confirm.setChecked(bool(b and b.confirmed))
@@ -1001,7 +1065,9 @@ class MainWindow(QMainWindow):
             amp = e.calibration.to_y_units((b.line_zero - v.y) * inv)
             vals = [str(i + 1), f"{v.x * inv:.1f}", f"{v.y * inv:.1f}", "山" if v.kind == "peak" else "谷",
                     f"{amp:.2f}", {"auto": "自動", "manual": "手動", "retrace": "再追跡"}[v.source],
-                    "先端で反転" if v.turn == "end" else "曲がり"]
+                    "先端で反転" if v.turn == "end" else "曲がり",
+                    (f"{corrected_x_work(v.x, v.y, b.line_zero, e.scale, e.calibration) * inv * e.calibration.mm_per_px_x:.2f}"
+                     if arc_active(e.calibration) else "—")]
             for c, s in enumerate(vals):
                 t.setItem(i, c, QTableWidgetItem(s))
         t.resizeColumnsToContents()
@@ -1137,6 +1203,17 @@ class MainWindow(QMainWindow):
                 self.refresh_panels()
 
             self.run_task("再追跡中…", job, done)
+        elif self.tool == "read":
+            row = e.read_point(self.sel_band, pt.x(), pt.y())
+            if row is None:
+                self._info("近くにトレースがありません（選択中の段のトレース上をクリックしてください）")
+                return
+            self.dirty = True
+            self._build_band_items(self.sel_band)
+            self.apply_visibility()
+            self.update_read_table()
+            self.tabs.setCurrentIndex(self.tabs.count() - 3)
+            self._info(self._format_readout(row))
         elif self.tool == "calib":
             self.calib_pts.append((pt.x(), pt.y()))
             if len(self.calib_pts) == 2:
@@ -1247,6 +1324,50 @@ class MainWindow(QMainWindow):
         self.update_measure_table()
         self._update_review_label()
 
+    # --------------------------------------------------------------- readouts
+    @staticmethod
+    def _format_readout(r):
+        txt = f"{r['band']}  X={r['x']:.0f}px  Y={r['y']:.0f}px  振幅={r['amp']:.2f}"
+        if r["x_mm"] is not None:
+            txt += f"  X={r['x_mm']:.2f}mm"
+        if r["t_s"] is not None:
+            txt += f"  時間={r['t_s']:.3f}s"
+        if r["x_arc_mm"] is not None:
+            txt += f"  ／補正後 X={r['x_arc_mm']:.2f}mm"
+            if r["t_arc_s"] is not None:
+                txt += f"  時間={r['t_arc_s']:.3f}s"
+        return txt
+
+    def update_read_table(self):
+        e = self.engine
+        t = self.read_table
+        t.setRowCount(len(e.readouts))
+
+        def f(v, n):
+            return "—" if v is None else f"{v:.{n}f}"
+        for i, rd in enumerate(e.readouts):
+            r = e.readout_row(rd)
+            for c, txt in enumerate([r["band"], f(r["x"], 0), f(r["y"], 0), f(r["amp"], 2), f(r["x_mm"], 2),
+                                     f(r["t_s"], 3), f(r["x_arc_mm"], 2), f(r["t_arc_s"], 3)]):
+                t.setItem(i, c, QTableWidgetItem(txt))
+        t.resizeColumnsToContents()
+        cal = e.calibration
+        self.read_note.setText(
+            "時間は各段の起点（左端）からの値です。" +
+            ("円弧補正を表示中。" if arc_active(cal) else "円弧補正は、「校正」タブでペンアーム長とX・Y校正を設定すると有効になります。"))
+
+    def action_remove_readout(self):
+        rows = self.read_table.selectionModel().selectedRows()
+        if rows and self.engine.remove_readout(rows[0].row()):
+            self.dirty = True
+            self._build_all_items()
+            self.update_read_table()
+
+    def _build_all_items(self):
+        for bi in range(len(self.engine.bands)):
+            self._build_band_items(bi)
+        self.apply_visibility()
+
     # ------------------------------------------------------------ sections
     def _section_y_range(self, bi):
         e = self.engine
@@ -1354,6 +1475,7 @@ class MainWindow(QMainWindow):
                      f(r["length_s"], 2, " s") if r["length_s"] is not None else f(r["length_px"], 0, " px"),
                      f(r.get("max_value"), 2), f(r.get("min_value"), 2), f(r.get("span"), 2),
                      f(r["waves"], 1 if r["waves"] % 1 else 0), period,
+                     (f(r["period_arc_s"], 3, " s") if r["period_arc_s"] is not None else f(r["period_arc_px"], 1, " px")),
                      f(r["freq_hz"], 3, " Hz") if r["freq_hz"] is not None else "—",
                      str(r["n_excluded"]), r["status"] + ("・追跡外を含む" if r["beyond_trace"] else "")]
             for c, txt in enumerate(cells):
@@ -1388,6 +1510,7 @@ class MainWindow(QMainWindow):
         self.dirty = True
         self.refresh_panels()
         self._show_tick_label()
+        self._build_all_items()
         self._info("換算条件を適用しました（作業ファイルとExcelに保存されます）")
 
     def _show_tick_label(self):

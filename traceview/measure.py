@@ -169,8 +169,48 @@ def section_stats(band, x0, x1, scale, cal, settings):
     else:
         res.update(period_px=None, period_min_px=None, period_max_px=None, period_mm=None, period_s=None,
                    freq_hz=None)
+    # the same period measured on the arc-corrected positions, reported next to the raw one
+    res.update(period_arc_px=None, period_arc_mm=None, period_arc_s=None, freq_arc_hz=None)
+    if arc_active(cal) and len(ref) >= 2:
+        cx = sorted(corrected_x_work(v.x, v.y, y0, scale, cal) for v in ref)
+        m = (cx[-1] - cx[0]) * inv / (len(cx) - 1)
+        res["period_arc_px"] = m
+        res["period_arc_mm"] = m * cal.mm_per_px_x
+        res["period_arc_s"] = m * sp if sp > 0 else None
+        res["freq_arc_hz"] = 1.0 / res["period_arc_s"] if res["period_arc_s"] else None
     # doubts that fall inside the section (MS-04)
     inside = [i for i in band.issues if x0 <= i.x <= x1]
     res["issues"] = {k: sum(1 for i in inside if i.kind == k) for k in ("ambiguous", "excursion", "untracked_end")}
     res["beyond_trace"] = (not band.complete) and x1 > band.end_x
     return res
+
+
+def arc_active(cal):
+    """Arc correction needs the arm length and the X and Y calibration."""
+    return cal.arm_length_mm > 0 and cal.mm_per_px_x > 0 and cal.mm_per_px_y > 0
+
+
+def corrected_x_work(x, y, y0, scale, cal):
+    """Arc-corrected x of a point (all in work px). Unchanged when the correction is not active."""
+    if not arc_active(cal):
+        return x
+    inv = 1.0 / scale
+    amp_mm = (y0 - y) * inv * cal.mm_per_px_y
+    x_mm = arc_corrected_x_mm(x * inv * cal.mm_per_px_x, amp_mm, cal.arm_length_mm, cal.arc_sign)
+    return x_mm / cal.mm_per_px_x * scale
+
+
+def corrected_path(path, y0, scale, cal):
+    """Whole pen path with the arc correction applied (float array, work px)."""
+    import numpy as np
+    out = path.astype(np.float64).copy()
+    if not arc_active(cal) or len(out) == 0:
+        return out
+    inv = 1.0 / scale
+    amp_mm = (y0 - out[:, 1]) * inv * cal.mm_per_px_y
+    r = cal.arm_length_mm
+    ok = np.abs(amp_mm) < r
+    shift = np.zeros(len(out))
+    shift[ok] = r - np.sqrt(r * r - amp_mm[ok] ** 2)
+    out[:, 0] = out[:, 0] - cal.arc_sign * shift / cal.mm_per_px_x * scale
+    return out

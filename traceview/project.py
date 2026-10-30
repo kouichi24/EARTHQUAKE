@@ -53,7 +53,7 @@ def save_project(engine, path):
         source=dict(path=engine.src_path, name=os.path.basename(engine.src_path), sha256=engine.digest,
                     page=engine.page, orig_size=list(engine.orig_size)),
         transform=dict(scale=engine.scale, rotation_deg=0.0, note="work = original * scale"),
-        profile=engine.profile_key, section_settings=engine.section_settings.to_dict(),
+        profile=engine.profile_key, section_settings=engine.section_settings.to_dict(), readouts=engine.readouts,
         params=engine.params.to_dict(), calibration=engine.calibration.to_dict(),
         bands=[],
     )
@@ -88,6 +88,7 @@ def load_project(engine, path, source_path=None, progress=lambda *a: None):
     engine.open(src, doc["source"]["page"], progress)
     engine.profile_key = doc.get("profile", "generic")
     engine.section_settings = SectionSettings.from_dict(doc.get("section_settings"))
+    engine.readouts = list(doc.get("readouts", []))
     engine.calibration = Calibration.from_dict(doc.get("calibration"))
     engine.bands = []
     for d in doc["bands"]:

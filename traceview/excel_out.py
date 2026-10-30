@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from . import __version__
-from .measure import COUNT_MODES, arc_corrected_x_mm
+from .measure import COUNT_MODES, arc_active, arc_corrected_x_mm, corrected_path
 from .profiles import get as get_profile
 
 SRC_LABEL = {"auto": "自動取得", "manual": "手動頂点", "retrace": "再追跡"}
@@ -20,7 +20,7 @@ class PendingEditsError(Exception):
     pass
 
 
-def overlay_image(engine, max_w=1800, with_original=True, draw_vertices=True, draw_lines=True):
+def overlay_image(engine, max_w=1800, with_original=True, draw_vertices=True, draw_lines=True, arc=False):
     img = cv2.cvtColor(engine.work, cv2.COLOR_RGB2BGR) if with_original else \
         np.full(engine.work.shape, 255, np.uint8)
     img = img.copy()
@@ -29,6 +29,11 @@ def overlay_image(engine, max_w=1800, with_original=True, draw_vertices=True, dr
         c = tuple(int(b.color[i:i + 2], 16) for i in (5, 3, 1))
         if len(b.path) > 1:
             cv2.polylines(img, [b.path.reshape(-1, 1, 2)], False, c, t)
+        if arc and arc_active(engine.calibration) and len(b.path) > 1:
+            cp = corrected_path(b.path, b.line_zero, engine.scale, engine.calibration)
+            dark = tuple(int(c * 0.45) for c in c)
+            for q in cp[::5].astype(np.int32):          # dotted line: corrected trace
+                cv2.circle(img, (int(q[0]), int(q[1])), max(1, t // 2 + 1), dark, -1)
         if draw_vertices:
             for v in b.vertices:
                 cv2.circle(img, (int(v.x), int(v.y)), t + 1, (0, 0, 0), -1)
@@ -123,6 +128,12 @@ def export_xlsx(engine, out_path, include_all_points=False):
     img2 = XLImage(io.BytesIO(png2))
     img2.width, img2.height = w2 * 0.6, h2 * 0.6
     ws.add_image(img2, f"A{note_r + 2 + int(h * 0.6 / 20) + 3}")
+    if cal.arm_length_mm > 0 and arc_active(cal):
+        png3, w3, h3 = overlay_image(engine, 1800, with_original=True, draw_vertices=False, arc=True)
+        img3 = XLImage(io.BytesIO(png3))
+        img3.width, img3.height = w3 * 0.6, h3 * 0.6
+        ws.add_image(img3, f"A{note_r + 2 + 2 * (int(h * 0.6 / 20) + 3)}")
+        ws.cell(note_r + 1 + 2 * (int(h * 0.6 / 20) + 3), 1, "円弧補正後のトレース（点線）を、元画像とトレース（実線）に重ねた図")
     for c in range(1, len(heads) + 1):
         ws.column_dimensions[get_column_letter(c)].width = 14
     ws.column_dimensions["A"].width = 16
@@ -199,7 +210,8 @@ def export_xlsx(engine, out_path, include_all_points=False):
     hx = ["段", "区間名", "状態", "X開始[px]", "X終了[px]", "長さ[px]", "長さ[mm]", "長さ[s]",
           f"最大値({unit})", "最大値X[px]", "最大値Y[px]", f"最小値({unit})", "最小値X[px]", "最小値Y[px]",
           f"上下幅({unit})", "山の数", "谷の数", "波の数", "平均周期[px]", "周期の最小[px]", "周期の最大[px]",
-          "平均周期[mm]", "平均周期[s]", "周波数[Hz]", "使った頂点数", "除外した頂点数",
+          "平均周期[mm]", "平均周期[s]", "周波数[Hz]", "円弧補正後の平均周期[px]", "円弧補正後の平均周期[mm]",
+          "円弧補正後の平均周期[s]", "円弧補正後の周波数[Hz]", "使った頂点数", "除外した頂点数",
           "区間内の曖昧さ", "区間内の逸脱", "末端未追跡にかかる", "備考"]
     r0x = 2 + len(notes) + 1
     for c, h in enumerate(hx, 1):
@@ -222,7 +234,7 @@ def export_xlsx(engine, out_path, include_all_points=False):
                    r.get("max_value"), r.get("max_x"), r.get("max_y"), r.get("min_value"), r.get("min_x"),
                    r.get("min_y"), r.get("span"), r["peaks"], r["valleys"], r["waves"], r["period_px"],
                    r["period_min_px"], r["period_max_px"], r["period_mm"], r["period_s"], r["freq_hz"],
-                   r["n_vertices"], r["n_excluded"], r["issues"]["ambiguous"], r["issues"]["excursion"],
+                   r["period_arc_px"], r["period_arc_mm"], r["period_arc_s"], r["freq_arc_hz"], r["n_vertices"], r["n_excluded"], r["issues"]["ambiguous"], r["issues"]["excursion"],
                    "はい" if r["beyond_trace"] else "", " / ".join(remark)]
             for c, v in enumerate(row, 1):
                 wsx.cell(rx, c, round(v, 3) if isinstance(v, float) else v)
@@ -234,6 +246,25 @@ def export_xlsx(engine, out_path, include_all_points=False):
         wsx.column_dimensions[get_column_letter(c)].width = 13
     wsx.column_dimensions["A"].width = 10
     wsx.column_dimensions["C"].width = 22
+
+    # ---- sheet: points read from the trace (raw and arc-corrected side by side)
+    wsr = wb.create_sheet("読取点")
+    hr = ["段", "X[px]", "Y[px]", f"振幅({unit})", "X[mm]", "起点からの時間[s]", "円弧補正後のX[mm]", "円弧補正後の時間[s]"]
+    for c, h in enumerate(hr, 1):
+        cell = wsr.cell(1, c, h)
+        cell.font = bold
+        cell.fill = hdr_fill
+    for rd in engine.readouts:
+        r = engine.readout_row(rd)
+        wsr.append([r["band"], r["x"], r["y"], r["amp"], r["x_mm"], r["t_s"], r["x_arc_mm"], r["t_arc_s"]])
+    for row in wsr.iter_rows(min_row=2):
+        for cell in row:
+            if isinstance(cell.value, float):
+                cell.value = round(cell.value, 3)
+    wsr.cell(max(3, wsr.max_row + 2), 1, "時間は各段の起点（左端）からの値。換算が未設定の列は空欄。円弧補正はペンアーム長・X/Y校正があるときだけ。")
+    wsr.freeze_panes = "A2"
+    for c in range(1, len(hr) + 1):
+        wsr.column_dimensions[get_column_letter(c)].width = 16
 
     # ---- sheet 4: issues
     ws4 = wb.create_sheet("要確認")
