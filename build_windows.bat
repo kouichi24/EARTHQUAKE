@@ -2,8 +2,10 @@
 rem TraceView: build a distributable folder (dist\TraceView\TraceView.exe). Run on Windows.
 chcp 65001 >nul
 cd /d "%~dp0"
+set PY=python
+where py >nul 2>nul && set PY=py
 echo [1/4] 仮想環境を作成します
-python -m venv .venv || goto :error
+%PY% -m venv .venv || goto :error
 call .venv\Scripts\activate.bat || goto :error
 echo [2/4] 必要なライブラリを入れます（この手順だけネットワークが必要です）
 python -m pip install --upgrade pip || goto :error
