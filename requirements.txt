@@ -2,7 +2,7 @@ numpy
 scipy
 opencv-python-headless
 scikit-image
-PySide6
+PySide6-Essentials
 PyMuPDF
 openpyxl
 Pillow

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+*.trproj.tmp
+selftest_result.txt
