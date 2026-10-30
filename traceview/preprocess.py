@@ -46,6 +46,8 @@ def find_paper(rgb):
 
 
 def prepare(rgb, params):
+    if params.invert:                    # light line on dark paper -> dark line on light paper
+        rgb = 255 - rgb
     h, w = rgb.shape[:2]
     paper = find_paper(rgb)
     x0, y0, x1, y1 = paper
@@ -85,6 +87,8 @@ def prepare(rgb, params):
     closed = cv2.morphologyEx(ink.astype(np.uint8), cv2.MORPH_CLOSE,
                               cv2.getStructuringElement(cv2.MORPH_RECT, (3, 25))) > 0
     ink = ink | (closed & band)
+    if params.drop_marks:
+        ink = _drop_marks(ink, ref_zone, params)
     # Small specks away from everything are dirt/noise.
     ink = _drop_small(ink, params.min_component_area)
     ink = _fill_small_holes(ink, params.hole_fill_area)
@@ -178,3 +182,30 @@ def _extend_ref_lines(ink, ref, params, xs):
             sel = thin[yy, xx] & ~near
             out[yy[sel], xx[sel]] = True
     return out, zone
+
+
+def _drop_marks(ink, ref_zone, params):
+    """Time ticks and small solid marks lie next to the reference lines and are not waveform.
+
+    Only small, isolated components close to a reference line are removed, so a real peak
+    (which is part of the long waveform component) is never touched.
+    """
+    if not ref_zone.any():
+        return ink
+    near = cv2.dilate(ref_zone.astype(np.uint8),
+                      cv2.getStructuringElement(cv2.MORPH_RECT, (1, 2 * params.mark_max_px + 1))) > 0
+    # look at the ink without the reference lines: a tick touching a line is then a small component
+    # A spike tip that pokes through a reference line stays joined to its spike when the gap left by the
+    # line is closed vertically; a tick has no ink on the far side of the line and stays small.
+    temp = (ink & ~ref_zone).astype(np.uint8)
+    temp = cv2.morphologyEx(temp, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 31)))
+    n, lab, st, cen = cv2.connectedComponentsWithStats(temp, connectivity=8)
+    drop = np.zeros(n, bool)
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        if max(w, h) > params.mark_max_px:
+            continue
+        cx, cy = int(cen[i][0]), int(cen[i][1])
+        if near[min(cy, near.shape[0] - 1), min(cx, near.shape[1] - 1)]:
+            drop[i] = True
+    return ink & ~drop[lab]

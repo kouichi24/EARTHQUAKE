@@ -53,6 +53,7 @@ def save_project(engine, path):
         source=dict(path=engine.src_path, name=os.path.basename(engine.src_path), sha256=engine.digest,
                     page=engine.page, orig_size=list(engine.orig_size)),
         transform=dict(scale=engine.scale, rotation_deg=0.0, note="work = original * scale"),
+        profile=engine.profile_key,
         params=engine.params.to_dict(), calibration=engine.calibration.to_dict(),
         bands=[],
     )
@@ -85,6 +86,7 @@ def load_project(engine, path, source_path=None, progress=lambda *a: None):
         raise SourceMismatch("元ファイルが作業ファイルの作成時と異なります（別の原本への誤適用を防ぐため中止しました）")
     engine.params = Params.from_dict(doc.get("params"))
     engine.open(src, doc["source"]["page"], progress)
+    engine.profile_key = doc.get("profile", "generic")
     engine.calibration = Calibration.from_dict(doc.get("calibration"))
     engine.bands = []
     for d in doc["bands"]:

@@ -39,6 +39,7 @@ class Engine:
         self.bands = []
         self.calibration = Calibration()
         self.orig_size = (0, 0)
+        self.profile_key = "generic"
 
     # ------------------------------------------------------------------ open
     def open(self, path, page=0, progress=_noop):
@@ -56,6 +57,36 @@ class Engine:
         self.graph = None
         self.bands = []
         progress("読込完了", 1.0)
+
+    # ------------------------------------------------------- profiles / compare
+    def clone_for_profile(self, profile):
+        """A new engine on the same loaded image, analysed with the settings of `profile`."""
+        e = Engine(profile.apply(self.params))
+        e.profile_key = profile.key
+        e.src_path, e.page, e.digest = self.src_path, self.page, self.digest
+        e.rgb_orig, e.work, e.scale, e.orig_size = self.rgb_orig, self.work, self.scale, self.orig_size
+        e.calibration = Calibration.from_dict(self.calibration.to_dict())
+        return e
+
+    def quality_summary(self):
+        """Rough indicators of how cleanly the trace came out. NOT a measure of correctness."""
+        right = self.prepared.paper[2] if self.prepared else self.work.shape[1]
+        inv = 1.0 / self.scale
+        done = sum(1 for b in self.bands if b.complete)
+        untracked = sum(max(0.0, right - b.end_x) for b in self.bands) * inv
+        n = lambda kind: sum(1 for b in self.bands for i in b.issues if i.kind == kind)  # noqa: E731
+        return dict(bands=len(self.bands), complete=done, untracked_px=untracked,
+                    ambiguous=n("ambiguous"), excursion=n("excursion"), inferred=n("inferred"),
+                    no_origin=n("no_origin"), vertices=sum(len(b.vertices) for b in self.bands))
+
+    @staticmethod
+    def quality_sort_key(q):
+        """Smaller is better: all three bands found, reached the end, fewer doubtful spots."""
+        return (-(q["bands"] >= 3), -q["complete"], q["untracked_px"] // 50, q["excursion"], q["ambiguous"])
+
+    def overlay_png(self, max_w=900):
+        from .excel_out import overlay_image
+        return overlay_image(self, max_w, with_original=True, draw_vertices=False, draw_lines=False)
 
     @property
     def pages(self):

@@ -10,6 +10,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from . import __version__
+from .measure import arc_corrected_x_mm
+from .profiles import get as get_profile
 
 SRC_LABEL = {"auto": "自動取得", "manual": "手動頂点", "retrace": "再追跡"}
 
@@ -79,6 +81,9 @@ def export_xlsx(engine, out_path, include_all_points=False):
          f"Y: {cal.mm_per_px_y:.5f} mm/px, X: {cal.mm_per_px_x:.5f} mm/px, 紙送り {cal.seconds_per_mm} s/mm, "
          f"振幅係数 {cal.amplitude_factor} {cal.amplitude_unit} / mm  {cal.note}"),
         ("値の単位", unit),
+        ("記録方式の設定", get_profile(engine.profile_key).name + "／" + get_profile(engine.profile_key).verified),
+        ("円弧補正", (f"ペンアーム長 {cal.arm_length_mm} mm、向き {cal.arc_sign:+d}（補正後Xの列を出力）"
+                    if cal.arm_length_mm > 0 and cal.mm_per_px_x > 0 and cal.mm_per_px_y > 0 else "なし")),
     ]
     for i, (k, v) in enumerate(meta):
         ws.cell(3 + i, 1, k).font = bold
@@ -125,7 +130,9 @@ def export_xlsx(engine, out_path, include_all_points=False):
 
     # ---- sheet 2: reconstructed coordinates
     ws2 = wb.create_sheet("復元座標")
-    h2s = ["段", "復元順", "X[px]", "Y[px]", f"振幅({unit})", "区分"]
+    arc_on = cal.arm_length_mm > 0 and cal.mm_per_px_x > 0 and cal.mm_per_px_y > 0
+    h2s = ["段", "復元順", "X[px]", "Y[px]", f"振幅({unit})", "区分"] + (["円弧補正後のX[mm]"] if arc_on else []) \
+        + (["補正後Xからの時間[s]"] if arc_on and cal.seconds_per_mm > 0 else [])
     for c, h in enumerate(h2s, 1):
         cell = ws2.cell(1, c, h)
         cell.font = bold
@@ -142,15 +149,19 @@ def export_xlsx(engine, out_path, include_all_points=False):
             v = vmap.get(i)
             if v is not None and v.source != "auto":
                 kind = SRC_LABEL[v.source]
-            ws2.append([b.name, int(i) + 1, round(float(x) * inv, 2), round(float(y) * inv, 2),
-                        round(cal.to_y_units((b.line_zero - float(y)) * inv), 3), kind])
+            row2 = [b.name, int(i) + 1, round(float(x) * inv, 2), round(float(y) * inv, 2),
+                    round(cal.to_y_units((b.line_zero - float(y)) * inv), 3), kind]
+            if arc_on:
+                row2 += _arc_cols(cal, b, float(x), float(y), inv)
+            ws2.append(row2)
             r += 1
     ws2.freeze_panes = "A2"
 
     # ---- sheet 3: vertices
     ws3 = wb.create_sheet("頂点と折返し")
     h3 = ["段", "頂点番号", "X[px]", "Y[px]", "山/谷", f"振幅({unit})", "往路/復路", "折返しの種類",
-          "対応する復元順", "由来", "要確認事項"]
+          "対応する復元順", "由来", "要確認事項"] + (["円弧補正後のX[mm]"] if arc_on else []) \
+        + (["補正後Xからの時間[s]"] if arc_on and cal.seconds_per_mm > 0 else [])
     for c, h in enumerate(h3, 1):
         cell = ws3.cell(1, c, h)
         cell.font = bold
@@ -160,11 +171,14 @@ def export_xlsx(engine, out_path, include_all_points=False):
             note = v.note
             if b.is_inferred_index(v.idx):
                 note = (note + " 推定接続の区間上").strip()
-            ws3.append([b.name, n, round(v.x * inv, 2), round(v.y * inv, 2), "山" if v.kind == "peak" else "谷",
-                        round(cal.to_y_units((b.line_zero - v.y) * inv), 3),
-                        "往路で到達" + (f"・復路で再通過{v.revisit}回" if v.revisit else ""),
-                        "先端で反転(行き止まり)" if v.turn == "end" else "曲がり",
-                        v.idx + 1, SRC_LABEL.get(v.source, v.source), note])
+            row3 = [b.name, n, round(v.x * inv, 2), round(v.y * inv, 2), "山" if v.kind == "peak" else "谷",
+                    round(cal.to_y_units((b.line_zero - v.y) * inv), 3),
+                    "往路で到達" + (f"・復路で再通過{v.revisit}回" if v.revisit else ""),
+                    "先端で反転(行き止まり)" if v.turn == "end" else "曲がり",
+                    v.idx + 1, SRC_LABEL.get(v.source, v.source), note]
+            if arc_on:
+                row3 += _arc_cols(cal, b, v.x, v.y, inv)
+            ws3.append(row3)
     ws3.freeze_panes = "A2"
 
     # ---- sheet 4: issues
@@ -186,3 +200,14 @@ def export_xlsx(engine, out_path, include_all_points=False):
 
 def _r(v):
     return None if v is None else round(v, 2)
+
+
+def _arc_cols(cal, band, x, y, inv):
+    """[arc-corrected x in mm, time in s from the band origin] for one point (original px = work * inv)."""
+    amp_mm = (band.line_zero - y) * inv * cal.mm_per_px_y
+    x_mm = arc_corrected_x_mm(x * inv * cal.mm_per_px_x, amp_mm, cal.arm_length_mm, cal.arc_sign)
+    out = [round(x_mm, 3)]
+    if cal.seconds_per_mm > 0:
+        x0_mm = band.origin[0] * inv * cal.mm_per_px_x
+        out.append(round((x_mm - x0_mm) * cal.seconds_per_mm, 3))
+    return out

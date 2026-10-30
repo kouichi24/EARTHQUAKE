@@ -20,6 +20,7 @@ from ..engine import Engine, EngineError
 from ..excel_out import PendingEditsError, export_xlsx
 from ..imageio import page_count
 from ..measure import Calibration
+from ..profiles import PROFILES, get as get_profile
 from ..project import SourceMismatch, load_project, save_project
 from ..svg_out import export_svg
 from .view import ImageView, LineItem, VertexItem, make_path_item, polyline_path
@@ -118,6 +119,14 @@ class MainWindow(QMainWindow):
         self.page_spin.setToolTip("PDF・TIFFのページ選択（変更すると読み込み直します）")
         self.page_spin.editingFinished.connect(self._page_changed)
         self.a_analyze = self._act("自動解析", self.action_analyze, "F5", tip="三段の起点と波形を自動取得")
+        self.profile_combo = QComboBox()
+        for pr in PROFILES:
+            self.profile_combo.addItem(pr.name, pr.key)
+        self.profile_combo.setToolTip("記録方式の設定。方式が分からないときは「方式を探す」で数種類を試せます")
+        self.profile_combo.setMaximumWidth(280)
+        self.profile_combo.activated.connect(self._profile_chosen)
+        self.a_compare = self._act("方式を探す…", self.action_compare, "F6",
+                                   tip="記録方式の設定を数種類試し、重ね表示の見た目で選ぶ")
         self.a_save = self._act("作業を保存", self.action_save, "Ctrl+S")
         self.a_load = self._act("作業を開く…", self.action_load_project)
         self.a_xlsx = self._act("Excel出力…", self.action_export_xlsx)
@@ -125,7 +134,8 @@ class MainWindow(QMainWindow):
         for a in (self.a_open,):
             tb.addAction(a)
         tb.addWidget(self.page_spin)
-        for a in (self.a_analyze, self.a_save, self.a_load, self.a_xlsx, self.a_svg):
+        tb.addWidget(self.profile_combo)
+        for a in (self.a_analyze, self.a_compare, self.a_save, self.a_load, self.a_xlsx, self.a_svg):
             tb.addAction(a)
         tb.addSeparator()
         # editing tools
@@ -268,6 +278,12 @@ class MainWindow(QMainWindow):
         self.c_speed.setDecimals(4)
         self.c_amp.setRange(0, 1e9)
         self.c_amp.setDecimals(5)
+        self.c_arm = QDoubleSpinBox()
+        self.c_arm.setRange(0, 100000)
+        self.c_arm.setDecimals(2)
+        self.c_arc = QComboBox()
+        self.c_arc.addItem("+1（振幅が大きいほどXが進む向きにずれる）", 1)
+        self.c_arc.addItem("−1（振幅が大きいほどXが戻る向きにずれる）", -1)
         self.c_unit = QComboBox()
         self.c_unit.setEditable(True)
         self.c_unit.addItems(["", "μm", "nm", "cm/s", "gal"])
@@ -276,6 +292,8 @@ class MainWindow(QMainWindow):
         cl.addRow("紙送り速度 [mm/s]", self.c_speed)
         cl.addRow("振幅換算係数 [単位/mm]", self.c_amp)
         cl.addRow("振幅の単位", self.c_unit)
+        cl.addRow("ペンアーム長 [mm]（円弧補正。0=補正しない）", self.c_arm)
+        cl.addRow("円弧のずれの向き", self.c_arc)
         bx = QPushButton("定規上の2点でX方向を設定")
         bx.clicked.connect(lambda: self.start_calibration("x"))
         by = QPushButton("定規上の2点でY方向を設定")
@@ -329,6 +347,9 @@ class MainWindow(QMainWindow):
         has_img = self.engine.work is not None
         has_b = bool(self.engine.bands)
         self.a_analyze.setEnabled(has_img)
+        self.a_compare.setEnabled(has_img)
+        self.profile_combo.setEnabled(has_img)
+        self._sync_profile_combo()
         for a in (self.a_save, self.a_xlsx, self.a_svg, self.a_undo, self.a_redo, self.a_reset, self.a_apply,
                   self.a_cancel_pending, self.t_add, self.t_origin, self.a_play, self.a_prev_v, self.a_next_v,
                   self.a_zoom_sel):
@@ -427,11 +448,11 @@ class MainWindow(QMainWindow):
             return
         self.open_file(e.src_path, self.page_spin.value() - 1)
 
-    def action_analyze(self):
+    def action_analyze(self, force=False):
         e = self.engine
         if e.work is None:
             return
-        if e.bands and not self._confirm("解析をやり直すと、現在のトレースと修正は初期化されます。続けますか？"):
+        if e.bands and not force and not self._confirm("解析をやり直すと、現在のトレースと修正は初期化されます。続けますか？"):
             return
         self._set_state("解析", "解析中…")
 
@@ -449,6 +470,84 @@ class MainWindow(QMainWindow):
                 self._info("三段のうち一部の起点が見つかりませんでした。「起点を指定」で補助してください")
 
         self.run_task("解析中…", job, done, lambda m: (self._set_state("解析", "失敗"), self._show_error(m)))
+
+    # ------------------------------------------------------------ profiles
+    def _sync_profile_combo(self):
+        i = self.profile_combo.findData(self.engine.profile_key)
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.setCurrentIndex(max(0, i))
+        self.profile_combo.blockSignals(False)
+
+    def _profile_chosen(self, index):
+        self.set_profile(self.profile_combo.itemData(index))
+
+    def set_profile(self, key, reanalyze=True):
+        e = self.engine
+        if e.work is None or key == e.profile_key:
+            return
+        pr = get_profile(key)
+        if e.bands and not self._confirm(f"記録方式の設定を「{pr.name}」に変えると、解析をやり直します（現在のトレースと修正は初期化）。よろしいですか？"):
+            self._sync_profile_combo()
+            return
+        e.profile_key = key
+        e.params = pr.apply(e.params)
+        e.graph = None
+        e.prepared = None
+        e.bands = []
+        self.dirty = True
+        self._set_state("解析", f"設定「{pr.name}」（{pr.verified}）")
+        self.rebuild_scene()
+        self._update_enabled()
+        if reanalyze:
+            self.action_analyze(force=True)
+
+    def action_compare(self):
+        """Try every profile and let the user choose by the look of the overlay."""
+        e = self.engine
+        if e.work is None:
+            return
+        if e.bands and not self._confirm("記録方式を探すと、結果を選んだときに現在のトレースと修正は初期化されます。続けますか？"):
+            return
+        self._set_state("解析", "方式を探索中…")
+
+        def job(cb):
+            rows = []
+            n = len(PROFILES)
+            for i, pr in enumerate(PROFILES):
+                c = e.clone_for_profile(pr)
+                c.analyze(progress=lambda m, f, i=i: cb(f"{pr.name}（{i + 1}/{n}）: {m}", (i + f) / n))
+                png, _w, _h = c.overlay_png(900)
+                rows.append(dict(profile=pr, engine=c, quality=c.quality_summary(), png=png))
+            rows.sort(key=lambda r: Engine.quality_sort_key(r["quality"]))
+            return rows
+
+        def done(rows):
+            self.compare_results = rows
+            self._set_state("解析", "方式の候補を表示中")
+            if self.sync_mode:
+                return
+            dlg = CompareDialog(rows, self)
+            if dlg.exec() == QDialog.Accepted and dlg.chosen is not None:
+                self.adopt_candidate(dlg.chosen)
+            else:
+                self._set_state("解析", "方式の選択を中止しました")
+
+        self.run_task("記録方式を探しています…", job, done,
+                      lambda m: (self._set_state("解析", "失敗"), self._show_error(m)))
+
+    def adopt_candidate(self, index):
+        row = self.compare_results[index]
+        new = row["engine"]
+        old = self.engine
+        new.calibration = old.calibration
+        if hasattr(old, "pages_total"):
+            new.pages_total = old.pages_total
+        self.engine = new
+        self.dirty = True
+        self.sel_band, self.sel_vertex = 0, None
+        self._set_state("解析", f"方式「{row['profile'].name}」を採用（{row['profile'].verified}）")
+        self.rebuild_scene()
+        self._update_enabled()
 
     def action_save(self):
         e = self.engine
@@ -1068,6 +1167,8 @@ class MainWindow(QMainWindow):
         self.c_speed.setValue(1 / c.seconds_per_mm if c.seconds_per_mm > 0 else 0)
         self.c_amp.setValue(c.amplitude_factor)
         self.c_unit.setCurrentText(c.amplitude_unit)
+        self.c_arm.setValue(c.arm_length_mm)
+        self.c_arc.setCurrentIndex(0 if c.arc_sign >= 0 else 1)
 
     def action_apply_calibration(self):
         c = self.engine.calibration
@@ -1076,6 +1177,8 @@ class MainWindow(QMainWindow):
         c.seconds_per_mm = 1 / self.c_speed.value() if self.c_speed.value() > 0 else 0.0
         c.amplitude_factor = self.c_amp.value()
         c.amplitude_unit = self.c_unit.currentText()
+        c.arm_length_mm = self.c_arm.value()
+        c.arc_sign = int(self.c_arc.currentData())
         self.dirty = True
         self.refresh_panels()
         self._info("換算条件を適用しました（作業ファイルとExcelに保存されます）")
@@ -1136,6 +1239,56 @@ class MainWindow(QMainWindow):
         if self.replay_idx >= len(b.path) - 1:
             self.replay_timer.stop()
             self.a_play.setChecked(False)
+
+
+class CompareDialog(QDialog):
+    """Candidates side by side: pick the one whose overlay looks right."""
+
+    def __init__(self, rows, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("記録方式を選ぶ")
+        self.resize(1500, 800)
+        self.chosen = None
+        root = QVBoxLayout(self)
+        note = QLabel("各設定で自動解析した結果です。元画像に重なって見えるものを選んでください。"
+                      "下の数値は「うまくたどれたように見えるか」の目安で、正しさの保証ではありません。")
+        note.setWordWrap(True)
+        root.addWidget(note)
+        grid = QHBoxLayout()
+        root.addLayout(grid, 1)
+        for i, r in enumerate(rows):
+            q = r["quality"]
+            box = QGroupBox(f"{i + 1}位　{r['profile'].name}")
+            lay = QVBoxLayout(box)
+            img = QLabel()
+            pm = QPixmap()
+            pm.loadFromData(r["png"])
+            img.setPixmap(pm.scaledToWidth(340, Qt.SmoothTransformation))
+            lay.addWidget(img)
+            info = QLabel(
+                f"三段の検出: {q['bands']}段\n末端まで追跡: {q['complete']}/{q['bands']}段\n"
+                f"未追跡の長さ: {q['untracked_px']:.0f}px\n要確認: 逸脱{q['excursion']}・曖昧{q['ambiguous']}・推定接続{q['inferred']}\n"
+                f"頂点数: {q['vertices']}")
+            lay.addWidget(info)
+            ver = QLabel(f"検証状況: {r['profile'].verified}")
+            if "未検証" in r["profile"].verified:
+                ver.setStyleSheet("color:#b45f00")
+            lay.addWidget(ver)
+            desc = QLabel(r["profile"].description)
+            desc.setWordWrap(True)
+            lay.addWidget(desc)
+            btn = QPushButton("この設定を使う")
+            btn.clicked.connect(lambda _c=False, i=i: self._choose(i))
+            lay.addWidget(btn)
+            lay.addStretch(1)
+            grid.addWidget(box)
+        bb = QDialogButtonBox(QDialogButtonBox.Cancel)
+        bb.rejected.connect(self.reject)
+        root.addWidget(bb)
+
+    def _choose(self, i):
+        self.chosen = i
+        self.accept()
 
 
 def main(argv=None):

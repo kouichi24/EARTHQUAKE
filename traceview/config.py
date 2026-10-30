@@ -19,6 +19,9 @@ class Params:
     snap_radius: int = 14              # radius used to snap an edited vertex to the image line [px]
     ambiguity_margin: float = 0.25     # score gap below which a junction is reported as ambiguous
     undo_limit: int = 50
+    invert: bool = False               # light line on dark paper (e.g. smoked paper): invert before analysis
+    drop_marks: bool = False           # remove time ticks / small black marks near the reference lines
+    mark_max_px: int = 40              # marks are components no larger than this [px] near a reference line
 
     def to_dict(self):
         return asdict(self)

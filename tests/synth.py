@@ -6,7 +6,7 @@ W, H = 2400, 1200
 BASELINES = [250, 600, 950]
 
 
-def make_sheet(seed=1):
+def make_sheet(seed=1, ticks=False, invert=False):
     rng = np.random.default_rng(seed)
     img = np.zeros((H, W, 3), np.uint8)
     img[:] = (170, 195, 205)                                   # beige paper (BGR)
@@ -49,6 +49,15 @@ def make_sheet(seed=1):
         pts.append((W - 80, by))
         cv2.polylines(img, [np.array(pts, np.int32).reshape(-1, 1, 2)], False, ink, 3, cv2.LINE_AA)
         truth[bi] = dict(baseline=by, peaks=peaks)
+    if ticks:
+        # time ticks (short vertical marks) and small solid marks just above the reference lines
+        for bi, by in enumerate(BASELINES):
+            for x in range(120, W - 100, 90):
+                cv2.line(img, (x, by - 112), (x, by - 96), ink, 2)
+            cv2.rectangle(img, (150, by - 108), (166, by - 98), ink, -1)
     # annotation in orange that must be ignored
     cv2.putText(img, "memo", (900, 420), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (60, 120, 230), 3)
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB), truth
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    if invert:
+        rgb = 255 - rgb          # light line on dark paper
+    return rgb, truth
