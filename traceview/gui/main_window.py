@@ -128,6 +128,10 @@ class MainWindow(QMainWindow):
         self.profile_combo.setToolTip("記録方式の設定。方式が分からないときは「方式を探す」で数種類を試せます")
         self.profile_combo.setMaximumWidth(280)
         self.profile_combo.activated.connect(self._profile_chosen)
+        self.cb_gap = QCheckBox("途切れを推定でつなぐ")
+        self.cb_gap.setChecked(True)
+        self.cb_gap.setToolTip("オン: 画像に薄い線の痕跡がある所だけ推定でつなぐ（黄色の破線で表示）。\nオフ: 途切れはつながず、未追跡として示す")
+        self.cb_gap.toggled.connect(self._gap_toggled)
         self.a_compare = self._act("方式を探す…", self.action_compare, "F6",
                                    tip="記録方式の設定を数種類試し、重ね表示の見た目で選ぶ")
         self.a_save = self._act("作業を保存", self.action_save, "Ctrl+S")
@@ -138,6 +142,7 @@ class MainWindow(QMainWindow):
             tb.addAction(a)
         tb.addWidget(self.page_spin)
         tb.addWidget(self.profile_combo)
+        tb.addWidget(self.cb_gap)
         for a in (self.a_analyze, self.a_compare, self.a_save, self.a_load, self.a_xlsx, self.a_svg):
             tb.addAction(a)
         tb.addSeparator()
@@ -438,6 +443,10 @@ class MainWindow(QMainWindow):
         self.a_analyze.setEnabled(has_img)
         self.a_compare.setEnabled(has_img)
         self.profile_combo.setEnabled(has_img)
+        self.cb_gap.setEnabled(has_img)
+        self.cb_gap.blockSignals(True)
+        self.cb_gap.setChecked(self.engine.params.gap_mode != "off")
+        self.cb_gap.blockSignals(False)
         self._sync_profile_combo()
         for a in (self.a_save, self.a_xlsx, self.a_svg, self.a_undo, self.a_redo, self.a_reset, self.a_apply,
                   self.a_cancel_pending, self.t_add, self.t_origin, self.t_section, self.t_read, self.a_play, self.a_prev_v, self.a_next_v,
@@ -566,6 +575,23 @@ class MainWindow(QMainWindow):
         self.profile_combo.blockSignals(True)
         self.profile_combo.setCurrentIndex(max(0, i))
         self.profile_combo.blockSignals(False)
+
+    def _gap_toggled(self, on):
+        e = self.engine
+        mode = "evidence" if on else "off"
+        if e.work is None or e.params.gap_mode == mode:
+            return
+        if e.bands and not self._confirm("設定を変えると解析をやり直します（現在のトレースと修正は初期化）。よろしいですか？"):
+            self._update_enabled()
+            return
+        e.params.gap_mode = mode
+        e.graph = None
+        e.prepared = None
+        e.bands = []
+        self.dirty = True
+        self.rebuild_scene()
+        self._update_enabled()
+        self.action_analyze(force=True)
 
     def _profile_chosen(self, index):
         self.set_profile(self.profile_combo.itemData(index))

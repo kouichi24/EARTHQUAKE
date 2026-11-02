@@ -13,6 +13,7 @@ class Prepared:
     ink_raw: np.ndarray     # bool mask before reference-line removal
     ref_lines: np.ndarray   # bool mask of removed reference lines
     ref_zone: np.ndarray    # bool mask within +-3 px of every fitted reference line (also where kept)
+    norm_min: np.ndarray = None   # local minimum (5x5) of the background-normalised gray: evidence of faint ink
 
 
 def find_paper(rgb):
@@ -92,7 +93,8 @@ def prepare(rgb, params):
     # Small specks away from everything are dirt/noise.
     ink = _drop_small(ink, params.min_component_area)
     ink = _fill_small_holes(ink, params.hole_fill_area)
-    return Prepared(paper=paper, ink=ink, ink_raw=ink_raw, ref_lines=ref, ref_zone=ref_zone)
+    norm_min = cv2.erode(norm.astype(np.float32), np.ones((5, 5), np.uint8))
+    return Prepared(paper=paper, ink=ink, ink_raw=ink_raw, ref_lines=ref, ref_zone=ref_zone, norm_min=norm_min)
 
 
 def _drop_small(mask, min_area):

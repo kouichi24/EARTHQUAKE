@@ -172,7 +172,7 @@ def _build(skel):
     return g
 
 
-def bridge_gaps(ink, g, max_gap=40, cos_min=0.92, thickness=3, max_vy=0.45):
+def bridge_gaps(ink, g, max_gap=40, cos_min=0.92, thickness=3, max_vy=0.45, evidence=None):
     """Join broken thin lines: end points are linked to a skeleton pixel straight ahead.
 
     Returns (ink_with_bridges, bridge_mask). Bridge pixels are later reported as
@@ -211,12 +211,14 @@ def bridge_gaps(ink, g, max_gap=40, cos_min=0.92, thickness=3, max_vy=0.45):
         if not ok.any():
             continue
         i = np.flatnonzero(ok)[np.argmin(dist[ok])]
+        if evidence is not None and not evidence((x, y), (int(xx[i]), int(yy[i]))):
+            continue                      # no trace of a line in the gap: do not draw one
         cv2.line(bridge, (x, y), (int(xx[i]), int(yy[i])), 1, thickness)
     out = ink | (bridge > 0)
     return out, bridge > 0
 
 
-def add_virtual_edges(g, max_gap=150, cos_out=0.8, cos_in=0.5, max_dy_frac=0.45):
+def add_virtual_edges(g, max_gap=150, cos_out=0.8, cos_in=0.5, max_dy_frac=0.45, evidence=None):
     """Link broken thin lines: an end point that looks rightwards is joined to the nearest
     end point ahead (an estimated connection, TR-06). Spike tips point up/down and never qualify."""
     ends = []
@@ -261,6 +263,8 @@ def add_virtual_edges(g, max_gap=150, cos_out=0.8, cos_in=0.5, max_dy_frac=0.45)
         if best is None:
             continue
         b = ends[best][0]
+        if evidence is not None and not evidence((g.nodes[a].x, g.nodes[a].y), (g.nodes[b].x, g.nodes[b].y)):
+            continue                      # nothing in the image between the two ends: leave the gap open
         n_pts = int(max(2, bd))
         xs = np.round(np.linspace(g.nodes[a].x, g.nodes[b].x, n_pts)).astype(np.int32)
         ys = np.round(np.linspace(g.nodes[a].y, g.nodes[b].y, n_pts)).astype(np.int32)

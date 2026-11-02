@@ -106,11 +106,28 @@ class Engine:
         sk = skeleton_of(self.prepared.ink)
         g = build_graph(sk, self.params.spur_min_len)
         progress("途切れを補修中", 0.6)
-        ink2, _ = bridge_gaps(self.prepared.ink, g, max_gap=20, cos_min=0.6, max_vy=1.1)
-        g = build_graph(skeleton_of(ink2), self.params.spur_min_len)
-        add_virtual_edges(g)
+        if self.params.gap_mode == "off":
+            ink2 = self.prepared.ink
+        else:
+            ink2, _ = bridge_gaps(self.prepared.ink, g, max_gap=20, cos_min=0.6, max_vy=1.1, evidence=self.gap_evidence)
+            g = build_graph(skeleton_of(ink2), self.params.spur_min_len)
+            add_virtual_edges(g, max_gap=self.params.virtual_max_gap, max_dy_frac=0.25, evidence=self.gap_evidence)
         self.graph = g
         self.ink = ink2
+
+    def gap_evidence(self, p0, p1):
+        """True when the image shows a (faint) trace along the straight link p0-p1.
+
+        Estimated links are only allowed where the paper is darker than its background along most of
+        the link; across clean paper nothing is drawn (TR-06: no line is invented).
+        """
+        nm = self.prepared.norm_min if self.prepared is not None else None
+        if nm is None:
+            return False
+        n = int(max(2, np.hypot(p1[0] - p0[0], p1[1] - p0[1])))
+        xs = np.clip(np.round(np.linspace(p0[0], p1[0], n)).astype(int), 0, nm.shape[1] - 1)
+        ys = np.clip(np.round(np.linspace(p0[1], p1[1], n)).astype(int), 0, nm.shape[0] - 1)
+        return float(np.mean(nm[ys, xs] < self.params.gap_evidence_thr)) >= self.params.gap_evidence_min
 
     def detect_origins(self):
         """Origin (start of trace at the left) of each band, found from the quiet pen line."""
@@ -207,8 +224,10 @@ class Engine:
             blocked |= {int(e) for e in eids if e >= 0}
             if end_x >= x_right - 0.03 * W:
                 break
+            if self.params.gap_mode == "off":
+                break
             end_pt = pix[-1]
-            best, bd = None, 700
+            cands = []
             for j, n in enumerate(g.nodes):
                 if n.kind != "end" or not n.edges or j in used_nodes:
                     continue
@@ -216,9 +235,17 @@ class Engine:
                     continue
                 if n.edges[0] in blocked:
                     continue
+                # a broken pen line continues about horizontally: steep links are not accepted
+                if abs(n.y - end_pt[1]) > 0.3 * max(1.0, n.x - end_pt[0]) + 8:
+                    continue
                 d = np.hypot(n.x - end_pt[0], 3.0 * (n.y - end_pt[1]))
-                if d < bd:
-                    best, bd = j, d
+                if d < self.params.jump_max_gap:
+                    cands.append((d, j))
+            best = None
+            for d, j in sorted(cands):
+                if self.gap_evidence((end_pt[0], end_pt[1]), (g.nodes[j].x, g.nodes[j].y)):
+                    best = j
+                    break
             if best is None:
                 break
             n = g.nodes[best]
@@ -246,7 +273,7 @@ class Engine:
             b.issues.append(Issue("ambiguous", x, y, "交差・接触で所属を判断しにくい箇所"))
         for a, c in inf:
             b.issues.append(Issue("inferred", float(path[a][0]), float(path[a][1]),
-                                  "画像の途切れを推定でつないだ区間"))
+                                  f"画像の薄い線の痕跡をたどって推定でつないだ区間（長さ約{(c - a + 1) / self.scale:.0f}px）"))
         # Stretches that leave the band's own territory (arcs, dirt, other bands) need a human look.
         origins = [bd.origin for bd in self.bands] if self.bands else [b.origin]
         if b.index < len(origins) and len(origins) >= 2 and len(path):

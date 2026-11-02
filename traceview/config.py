@@ -19,6 +19,11 @@ class Params:
     snap_radius: int = 14              # radius used to snap an edited vertex to the image line [px]
     ambiguity_margin: float = 0.25     # score gap below which a junction is reported as ambiguous
     undo_limit: int = 50
+    gap_mode: str = "evidence"        # "evidence": join broken lines only where the image shows a faint trace; "off": never join
+    gap_evidence_thr: float = 0.85     # background-normalised gray below this counts as ink evidence (paper = 1.0)
+    gap_evidence_min: float = 0.6      # share of the gap that must show evidence
+    virtual_max_gap: int = 120         # longest estimated link between line ends [px]
+    jump_max_gap: int = 300            # longest estimated jump to a further fragment [px]
     invert: bool = False               # light line on dark paper (e.g. smoked paper): invert before analysis
     drop_marks: bool = False           # remove time ticks / small black marks near the reference lines
     mark_max_px: int = 40              # marks are components no larger than this [px] near a reference line
