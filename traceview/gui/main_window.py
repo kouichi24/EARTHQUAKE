@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
         self.project_path = None
         self.worker = None
         self.auto_retrace = True
+        self.follow_line = True
         self.replay_idx = 0
         self.replay_marker = None
         self.replay_timer = QTimer(self)
@@ -176,12 +177,17 @@ class MainWindow(QMainWindow):
                                   tip="トレース線の不自然な所を検証し、引き直して、また検証（上限回数まで）。引き直した結果は履歴に残ります")
         self.a_apply = self._act("再追跡を適用", self.action_apply, "Ctrl+Return")
         self.a_cancel_pending = self._act("修正を取り消す", self.action_cancel_pending, "Esc")
+        self.cb_follow = QCheckBox("線に沿って動かす")
+        self.cb_follow.setChecked(True)
+        self.cb_follow.setToolTip("オン: 頂点をドラッグすると、画像の線の上だけを動く（つながっていない別の線へは飛ばない）。\nオフ: 自由に動かせる")
+        self.cb_follow.toggled.connect(lambda v: setattr(self, "follow_line", v))
         self.cb_auto = QCheckBox("移動後に自動で再追跡")
         self.cb_auto.setChecked(True)
         self.cb_auto.toggled.connect(lambda v: setattr(self, "auto_retrace", v))
         tb2.addAction(self.a_verify)
         tb2.addAction(self.a_apply)
         tb2.addAction(self.a_cancel_pending)
+        tb2.addWidget(self.cb_follow)
         tb2.addWidget(self.cb_auto)
         tb2.addSeparator()
         self.a_undo = self._act("戻す", self.action_undo, "Ctrl+Z")
@@ -808,6 +814,7 @@ class MainWindow(QMainWindow):
             self._load_calibration_fields()
             self.rebuild_scene()
             self._update_enabled()
+            self._prepare_for_editing()
 
         def fail(msg):
             if "見つかりません" in msg and not self.sync_mode:
@@ -818,6 +825,16 @@ class MainWindow(QMainWindow):
             self._show_error(msg)
 
         self.run_task("作業ファイルを読み込み中…", job, done, fail)
+
+    def _prepare_for_editing(self):
+        """Build the image graph after a work file is loaded (needed to move vertices along the line)."""
+        e = self.engine
+        if e.graph is not None or not e.bands:
+            return
+        self._set_state("解析", "編集の準備中（線の構造を作成）…")
+        self.run_task("編集の準備をしています…", lambda cb: e.ensure_graph(cb),
+                      lambda _r: self._set_state("解析", f"保存済みの結果（{len(e.bands)}段）・編集の準備完了"),
+                      lambda m: self._set_state("解析", "編集の準備に失敗"))
 
     def action_export_xlsx(self):
         e = self.engine
@@ -1285,6 +1302,13 @@ class MainWindow(QMainWindow):
         self.v_table.selectRow(k)
         self.v_table.blockSignals(False)
         self.on_vertex_selected(self.sel_band, k)
+
+    def make_line_constraint(self, x, y):
+        """Constraint keeping a dragged vertex on the image's line; falls back to free movement without a graph."""
+        lc = self.engine.line_constraint(x, y)
+        if lc is None:
+            self._info("線に沿う移動は、解析後（または編集の準備後）に使えます。いまは自由に動きます")
+        return lc
 
     def on_vertex_dragged(self, bi, vi, x, y):
         e = self.engine

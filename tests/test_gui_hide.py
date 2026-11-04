@@ -77,3 +77,20 @@ def test_stays_hidden_after_a_new_edit_redraws_items(win):
     assert not any(it.isVisible() for it in _overlay_items(win))
     win.a_hide_all.setChecked(False)
     win.apply_visibility()
+
+
+def test_dragged_vertex_item_stays_on_the_line(win):
+    from PySide6.QtCore import QPointF
+    d = win.band_items[0]["vertices"]
+    item = d[len(d) // 2]
+    x, y = item.pos().x(), item.pos().y()
+    win.follow_line = True
+    item._lc = win.make_line_constraint(x, y)
+    assert item._lc is not None
+    item._dragging = True
+    item.setPos(QPointF(x + 30, y + 45))                  # the mouse is dragged off the line
+    item._dragging = False
+    item._lc = None
+    p = item.pos()
+    assert win.engine.graph.skel[int(round(p.y())), int(round(p.x()))]     # the vertex is still on the line
+    item.setPos(QPointF(x, y))

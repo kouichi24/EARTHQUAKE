@@ -4,6 +4,7 @@ import os
 import cv2
 import numpy as np
 from scipy.signal import find_peaks
+from scipy.spatial import cKDTree
 from skimage.graph import route_through_array
 
 from . import __version__
@@ -15,6 +16,41 @@ from .model import BAND_COLORS, BAND_NAMES, Band, Issue
 from .preprocess import prepare
 from .tracer import Walker
 from .vertices import Vertex, extract_vertices
+
+
+class LineConstraint:
+    """Keeps a dragged point ON the image's line: it can only sit on skeleton pixels that are reachable from the
+    start pixel along the line within `limit` px, so it never jumps to a neighbouring line that is not connected."""
+
+    def __init__(self, skel, start_xy, limit=150):
+        from skimage.graph import MCP_Geometric
+        h, w = skel.shape
+        x, y = int(round(start_xy[0])), int(round(start_xy[1]))
+        x0, x1 = max(0, x - limit), min(w, x + limit + 1)
+        y0, y1 = max(0, y - limit), min(h, y + limit + 1)
+        sub = skel[y0:y1, x0:x1]
+        ys, xs = np.nonzero(sub)
+        self.ok = False
+        if len(xs) == 0:
+            return
+        d = np.hypot(xs + x0 - x, ys + y0 - y)
+        j = int(np.argmin(d))
+        if d[j] > 8:
+            return
+        costs = np.where(sub, 1.0, np.inf)
+        cum, _tb = MCP_Geometric(costs, fully_connected=True).find_costs([(int(ys[j]), int(xs[j]))])
+        ry, rx = np.nonzero(np.isfinite(cum) & (cum <= limit))
+        self.pts = np.stack([rx + x0, ry + y0], 1).astype(float)
+        self.tree = cKDTree(self.pts)
+        self.start = (int(xs[j] + x0), int(ys[j] + y0))
+        self.ok = len(self.pts) > 0
+
+    def snap(self, x, y):
+        """Nearest allowed point on the line to (x, y)."""
+        if not self.ok:
+            return x, y
+        _d, k = self.tree.query([x, y])
+        return float(self.pts[k][0]), float(self.pts[k][1])
 
 
 class EngineError(Exception):
@@ -412,6 +448,13 @@ class Engine:
         self.ensure_graph(progress)
         self._retrace_bands(affected, progress)
         return affected
+
+    def line_constraint(self, x, y, limit=150):
+        """Constraint that keeps a dragged vertex on the image's line (None while the graph is not built)."""
+        if self.graph is None:
+            return None
+        lc = LineConstraint(self.graph.skel, (x, y), limit)
+        return lc if lc.ok else None
 
     # ---------------------------------------------------------------- routing
     def _route(self, a, b, pad=150):

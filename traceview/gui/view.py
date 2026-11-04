@@ -98,6 +98,9 @@ class VertexItem(QGraphicsEllipseItem):
         self.setPen(QPen(QColor("black"), 1))
         self.setFlag(QGraphicsEllipseItem.ItemIgnoresTransformations, True)
         self.setFlag(QGraphicsEllipseItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsEllipseItem.ItemSendsGeometryChanges, True)
+        self._lc = None            # LineConstraint while dragging along the image's line
+        self._dragging = False
         self.setZValue(30)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -106,11 +109,22 @@ class VertexItem(QGraphicsEllipseItem):
 
     def mousePressEvent(self, ev):
         self.win.on_vertex_selected(self.band_i, self.vi, from_canvas=True)
+        if (self.flags() & QGraphicsEllipseItem.ItemIsMovable) and self.win.follow_line:
+            self._lc = self.win.make_line_constraint(self.pos().x(), self.pos().y())
+        self._dragging = True
         super().mousePressEvent(ev)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsEllipseItem.ItemPositionChange and self._dragging and self._lc is not None:
+            sx, sy = self._lc.snap(value.x(), value.y())
+            return QPointF(sx, sy)
+        return super().itemChange(change, value)
 
     def mouseReleaseEvent(self, ev):
         moved = self.flags() & QGraphicsEllipseItem.ItemIsMovable
         super().mouseReleaseEvent(ev)
+        self._dragging = False
+        self._lc = None
         if moved:
             self.win.on_vertex_dragged(self.band_i, self.vi, self.pos().x(), self.pos().y())
 
