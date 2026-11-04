@@ -87,6 +87,8 @@ def export_xlsx(engine, out_path, include_all_points=False):
          f"Y: {cal.mm_per_px_y:.5f} mm/px, X: {cal.mm_per_px_x:.5f} mm/px, 紙送り {cal.seconds_per_mm} s/mm, "
          f"振幅係数 {cal.amplitude_factor} {cal.amplitude_unit} / mm  {cal.note}"),
         ("値の単位", unit),
+        ("除外範囲", ("; ".join(f"X{r['x0'] * inv:.0f}-{r['x1'] * inv:.0f}, Y{r['y0'] * inv:.0f}-{r['y1'] * inv:.0f} px"
+                                for r in engine.exclusions) or "なし")),
         ("記録方式の設定", get_profile(engine.profile_key).name + "／" + get_profile(engine.profile_key).verified),
         ("円弧補正", (f"ペンアーム長 {cal.arm_length_mm} mm、向き {cal.arc_sign:+d}（補正後Xの列を出力）"
                     if cal.arm_length_mm > 0 and cal.mm_per_px_x > 0 and cal.mm_per_px_y > 0 else "なし")),

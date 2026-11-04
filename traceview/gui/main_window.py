@@ -99,6 +99,9 @@ class MainWindow(QMainWindow):
         self.view.dragFinished.connect(self._section_drag_done)
         self.section_preview = None
         self.rev_items = []
+        self.excl_items = []
+        self.ver_range = None
+        self.ver_range_item = None
         self._update_enabled()
         self._set_state("読込", "ファイル未選択")
 
@@ -164,7 +167,9 @@ class MainWindow(QMainWindow):
                                    "画像上で横にドラッグして、測定する範囲（区間）を指定")
         self.t_read = self._act("値を読む", lambda: self.set_tool("read"), "V", True,
                                 "トレース上をクリックして、その点の値（補正前・円弧補正後）を読み取る")
-        for a in (self.t_select, self.t_add, self.t_origin, self.t_section, self.t_read):
+        self.t_excl = self._act("除外範囲を囲む", lambda: self.set_tool("excl"), "E", True,
+                                "文字・汚れなど、線として取りたくない所を四角で囲む（その中の線は使われません）")
+        for a in (self.t_select, self.t_add, self.t_origin, self.t_section, self.t_read, self.t_excl):
             tb2.addAction(a)
         tb2.addSeparator()
         self.a_verify = self._act("検証して引き直す", lambda: self.action_verify(True), "F7",
@@ -329,6 +334,28 @@ class MainWindow(QMainWindow):
         self.sec_note.setWordWrap(True)
         sl.addWidget(self.sec_note)
         self.tabs.addTab(sw, "区間")
+        # exclusion tab
+        xw = QWidget()
+        xl = QVBoxLayout(xw)
+        xl.addWidget(QLabel("文字・汚れなど、線として取りたくない所を、「除外範囲を囲む」(E)で四角にドラッグして囲むと、"
+                            "その中の線は使われなくなり、該当する段は引き直されます（他の段は変わりません）。"))
+        self.excl_table = QTableWidget(0, 5)
+        self.excl_table.setHorizontalHeaderLabels(["#", "X", "Y", "幅", "高さ"])
+        self.excl_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.excl_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.excl_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        xl.addWidget(self.excl_table, 1)
+        rx = QHBoxLayout()
+        bx1 = QPushButton("選んだ除外範囲を削除")
+        bx1.clicked.connect(lambda: self.action_remove_exclusion(False))
+        bx2 = QPushButton("すべて削除")
+        bx2.clicked.connect(lambda: self.action_remove_exclusion(True))
+        rx.addWidget(bx1)
+        rx.addWidget(bx2)
+        xl.addLayout(rx)
+        xl.addWidget(QLabel("削除すると、その範囲の線も再び使われ、該当する段は引き直されます。"
+                            "引き直し前の状態は「戻す」(Ctrl+Z)で戻せます。"))
+        self.tabs.addTab(xw, "除外")
         # verify tab
         vw2 = QWidget()
         vl2 = QVBoxLayout(vw2)
@@ -339,12 +366,28 @@ class MainWindow(QMainWindow):
         self.ver_rounds.setValue(5)
         self.ver_rounds.setPrefix("最大 ")
         self.ver_rounds.setSuffix(" 回")
-        self.ver_all = QCheckBox("全段")
+        self.ver_target = QComboBox()
+        self.ver_target.addItem("選択中の段")
+        self.ver_target.setToolTip("検証・引き直しをする段。「選択中の段」は、右上の段の一覧で選んでいる段です")
         bchk = QPushButton("検証のみ")
         bchk.clicked.connect(lambda: self.action_verify(False))
         brun = QPushButton("検証して引き直す")
         brun.clicked.connect(lambda: self.action_verify(True))
-        for w_ in (self.ver_rounds, self.ver_all, bchk, brun):
+        vl2.addWidget(QLabel("① 対象の段（右上の段の一覧で選ぶか、ここで選ぶ）"))
+        vl2.addWidget(self.ver_target)
+        vl2.addWidget(QLabel("② 範囲（省略すると、段の全体）"))
+        self.ver_range_label = QLabel("範囲: 指定なし（段の全体）")
+        vl2.addWidget(self.ver_range_label)
+        rowr = QHBoxLayout()
+        b_rng = QPushButton("画面で範囲をドラッグして指定")
+        b_rng.clicked.connect(lambda: self.set_tool("vrange"))
+        b_rng_clear = QPushButton("範囲を解除")
+        b_rng_clear.clicked.connect(self.clear_verify_range)
+        rowr.addWidget(b_rng)
+        rowr.addWidget(b_rng_clear)
+        vl2.addLayout(rowr)
+        vl2.addWidget(QLabel("③ 実行"))
+        for w_ in (self.ver_rounds, bchk, brun):
             rowv.addWidget(w_)
         vl2.addLayout(rowv)
         vl2.addWidget(QLabel("現在の不自然な箇所（ダブルクリックで移動）"))
@@ -495,7 +538,7 @@ class MainWindow(QMainWindow):
         self.cb_gap.blockSignals(False)
         self._sync_profile_combo()
         for a in (self.a_save, self.a_xlsx, self.a_svg, self.a_undo, self.a_redo, self.a_reset, self.a_apply, self.a_verify,
-                  self.a_cancel_pending, self.t_add, self.t_origin, self.t_section, self.t_read, self.a_play, self.a_prev_v, self.a_next_v,
+                  self.a_cancel_pending, self.t_add, self.t_origin, self.t_section, self.t_read, self.t_excl, self.a_play, self.a_prev_v, self.a_next_v,
                   self.a_zoom_sel):
             a.setEnabled(has_b)
 
@@ -861,6 +904,8 @@ class MainWindow(QMainWindow):
         self.sel_ring = None
         self.replay_marker = None
         self.rev_items = []
+        self.excl_items = []
+        self.ver_range_item = None
         self.pix_item = None
         if e.work is None:
             return
@@ -1020,7 +1065,8 @@ class MainWindow(QMainWindow):
     def apply_visibility(self, *_):
         hide = self.a_hide_all.isChecked()
         self.a_hide_all.setText("図形を表示に戻す" if hide else "図形を全部消す")
-        for extra in (self.sel_ring, self.replay_marker, self.section_preview, *self.rev_items):
+        for extra in (self.sel_ring, self.replay_marker, self.section_preview, *self.rev_items, *self.excl_items,
+                      self.ver_range_item):
             if extra is not None and extra.scene() is self.scene:
                 extra.setVisible(not hide)
         if self.pix_item is not None:
@@ -1055,17 +1101,22 @@ class MainWindow(QMainWindow):
     def set_tool(self, tool):
         self.tool = tool
         for name, act in (("select", self.t_select), ("add", self.t_add), ("origin", self.t_origin),
-                          ("section", self.t_section), ("read", self.t_read)):
+                          ("section", self.t_section), ("read", self.t_read), ("excl", self.t_excl),
+                          ("vrange", None)):
+            if act is None:
+                continue
             act.setChecked(name == tool)
         self.view.click_tool = tool in ("add", "origin", "calib", "read")
-        self.view.drag_tool = tool == "section"
+        self.view.drag_tool = tool in ("section", "excl", "vrange")
         for d in self.band_items.values():
             for it in d["vertices"]:
                 it.set_editable(tool == "select")
         hint = {"select": "頂点をドラッグして移動／測定線は上下にドラッグ", "add": "追加する頂点（先端）をクリック",
                 "origin": "選択中の段の起点（波形の左端）をクリック", "calib": "1点目、2点目の順にクリック",
                 "section": "測定したい範囲を横にドラッグ（選択中の段に追加）",
-                "read": "値を読みたい点をトレース上でクリック（選択中の段）"}[tool]
+                "read": "値を読みたい点をトレース上でクリック（選択中の段）",
+                "excl": "線として取りたくない所（文字など）を、四角でドラッグして囲む",
+                "vrange": "検証・引き直しをする範囲を、横にドラッグして指定"}[tool]
         self.statusBar().showMessage(hint, 6000)
 
     # ------------------------------------------------------------ panels
@@ -1080,6 +1131,8 @@ class MainWindow(QMainWindow):
         self.sel_band = row
         self.sel_vertex = None
         self.refresh_panels()
+        if self.ver_range is not None:
+            self._show_verify_range()
 
     def refresh_panels(self):
         self.update_measure_table()
@@ -1088,6 +1141,8 @@ class MainWindow(QMainWindow):
         self.update_section_table()
         self.update_read_table()
         self.update_verify_tables()
+        self._update_verify_target_combo()
+        self.update_exclusion_table()
         b = self.current_band()
         self.cb_confirm.blockSignals(True)
         self.cb_confirm.setChecked(bool(b and b.confirmed))
@@ -1404,12 +1459,143 @@ class MainWindow(QMainWindow):
         self.update_measure_table()
         self._update_review_label()
 
+    # ------------------------------------------------------------ exclusions
+    def add_exclusion_rect(self, x0, y0, x1, y1):
+        e = self.engine
+        self._set_state("解析", "除外範囲を反映中…")
+
+        def job(cb):
+            return e.add_exclusion(x0, y0, x1, y1, cb)
+
+        def done(affected):
+            self.dirty = True
+            self._set_state("解析", f"除外範囲を追加（引き直した段: {', '.join(e.bands[i].name for i in affected) or 'なし'}）")
+            self._build_all_items()
+            self.refresh_panels()
+            self.tabs.setCurrentWidget(self.excl_table.parentWidget())
+            self.set_tool("select")
+
+        self.run_task("除外範囲を反映しています…", job, done,
+                      lambda m: (self._set_state("解析", "失敗"), self._show_error(m)))
+
+    def action_remove_exclusion(self, all_=False):
+        e = self.engine
+        rows = self.excl_table.selectionModel().selectedRows()
+        if not all_ and not rows:
+            return
+        ks = list(range(len(e.exclusions)))[::-1] if all_ else [rows[0].row()]
+        if all_ and not self._confirm("除外範囲をすべて削除し、線を引き直します。よろしいですか？"):
+            return
+
+        def job(cb):
+            return [e.remove_exclusion(k, cb) for k in ks]
+
+        def done(_r):
+            self.dirty = True
+            self._build_all_items()
+            self.refresh_panels()
+            self._set_state("解析", "除外範囲を削除しました")
+
+        self.run_task("除外範囲を外しています…", job, done)
+
+    def update_exclusion_table(self):
+        e = self.engine
+        t = self.excl_table
+        t.setRowCount(len(e.exclusions))
+        inv = 1 / e.scale
+        for i, r in enumerate(e.exclusions):
+            for c, txt in enumerate([str(i + 1), f"{r['x0'] * inv:.0f}", f"{r['y0'] * inv:.0f}",
+                                     f"{(r['x1'] - r['x0']) * inv:.0f}", f"{(r['y1'] - r['y0']) * inv:.0f}"]):
+                t.setItem(i, c, QTableWidgetItem(txt))
+        t.resizeColumnsToContents()
+        self._draw_exclusions()
+
+    def _draw_exclusions(self):
+        for it in self.excl_items:
+            if it.scene() is self.scene:
+                self.scene.removeItem(it)
+        self.excl_items = []
+        for i, r in enumerate(self.engine.exclusions):
+            rc = QGraphicsRectItem(r["x0"], r["y0"], r["x1"] - r["x0"], r["y1"] - r["y0"])
+            rc.setBrush(QBrush(QColor(244, 67, 54, 55), Qt.BDiagPattern))
+            pen = QPen(QColor("#f44336"), 1, Qt.DashLine)
+            pen.setCosmetic(True)
+            rc.setPen(pen)
+            rc.setZValue(5)
+            rc.setToolTip(f"除外範囲 {i + 1}（この中の線は使いません）")
+            self.scene.addItem(rc)
+            lbl = QGraphicsSimpleTextItem(f"除外{i + 1}")
+            lbl.setBrush(QBrush(QColor("#f44336")))
+            lbl.setFlag(QGraphicsSimpleTextItem.ItemIgnoresTransformations, True)
+            lbl.setPos(r["x0"] + 3, r["y0"] + 3)
+            lbl.setZValue(5)
+            self.scene.addItem(lbl)
+            self.excl_items += [rc, lbl]
+        self.apply_visibility()
+
+    # ------------------------------------------------- verify: target and range
+    def _verify_targets(self):
+        e = self.engine
+        k = self.ver_target.currentIndex()
+        if k == 0:
+            return [self.sel_band]
+        if k == self.ver_target.count() - 1:
+            return list(range(len(e.bands)))
+        return [k - 1]
+
+    def _update_verify_target_combo(self):
+        names = [b.name for b in self.engine.bands]
+        cur = self.ver_target.currentIndex()
+        self.ver_target.blockSignals(True)
+        self.ver_target.clear()
+        b = self.current_band()
+        self.ver_target.addItem(f"選択中の段（いま: {b.name if b else '—'}）")
+        for n in names:
+            self.ver_target.addItem(n)
+        self.ver_target.addItem("全段")
+        self.ver_target.setCurrentIndex(max(0, min(cur, self.ver_target.count() - 1)))
+        self.ver_target.blockSignals(False)
+
+    def set_verify_range(self, x0, x1):
+        if abs(x1 - x0) < 5:
+            return
+        self.ver_range = (min(x0, x1), max(x0, x1))
+        self._show_verify_range()
+        self.set_tool("select")
+        self.tabs.setCurrentWidget(self.find_table.parentWidget())
+
+    def clear_verify_range(self):
+        self.ver_range = None
+        self._show_verify_range()
+
+    def _show_verify_range(self):
+        if self.ver_range_item is not None and self.ver_range_item.scene() is self.scene:
+            self.scene.removeItem(self.ver_range_item)
+        self.ver_range_item = None
+        inv = 1 / self.engine.scale if self.engine.work is not None else 1
+        if self.ver_range is None:
+            self.ver_range_label.setText("範囲: 指定なし（段の全体）")
+        else:
+            x0, x1 = self.ver_range
+            self.ver_range_label.setText(f"範囲: X {x0 * inv:.0f} ～ {x1 * inv:.0f} px（この範囲の不自然な所だけを引き直す）")
+            y0, y1 = (self._section_y_range(self.sel_band) if self.engine.bands else (0, self.engine.work.shape[0]))
+            it = QGraphicsRectItem(x0, y0, x1 - x0, y1 - y0)
+            it.setBrush(QBrush(QColor(33, 150, 243, 40)))
+            pen = QPen(QColor("#2196f3"), 1, Qt.DashLine)
+            pen.setCosmetic(True)
+            it.setPen(pen)
+            it.setZValue(4)
+            self.scene.addItem(it)
+            self.ver_range_item = it
+        self.apply_visibility()
+
     # --------------------------------------------------------------- verify
     def action_verify(self, repair=True):
         e = self.engine
         if not e.bands:
             return
-        targets = list(range(len(e.bands))) if self.ver_all.isChecked() else [self.sel_band]
+        targets = self._verify_targets()
+        xr = self.ver_range
         rounds = self.ver_rounds.value()
         self._set_state("再追跡", "検証中…")
         self.reports = []
@@ -1419,7 +1605,7 @@ class MainWindow(QMainWindow):
             for k, bi in enumerate(targets):
                 out.append(verify_and_repair(e, bi, max_rounds=rounds,
                                              progress=lambda m, f, k=k: cb(m, (k + f) / len(targets)),
-                                             repair_on=repair))
+                                             repair_on=repair, x_range=xr))
             return out
 
         def done(reports):
@@ -1558,22 +1744,33 @@ class MainWindow(QMainWindow):
         bd = self.current_band()
         if bd is None:
             return
-        y0, y1 = self._section_y_range(self.sel_band)
+        if self.tool == "excl":
+            y0, y1 = a.y(), b.y()
+            color, pen_col = QColor(244, 67, 54, 70), "#f44336"
+        else:
+            y0, y1 = self._section_y_range(self.sel_band)
+            color, pen_col = ((QColor(33, 150, 243, 60), "#2196f3") if self.tool == "vrange"
+                              else (QColor(255, 235, 59, 60), "#ffeb3b"))
         if self.section_preview is None:
             it = QGraphicsRectItem()
-            it.setBrush(QBrush(QColor(255, 235, 59, 60)))
-            it.setPen(QPen(QColor("#ffeb3b"), 1, Qt.DashLine))
             it.setZValue(8)
             self.scene.addItem(it)
             self.section_preview = it
-        self.section_preview.setRect(min(a.x(), b.x()), y0, abs(b.x() - a.x()), y1 - y0)
+        self.section_preview.setBrush(QBrush(color))
+        self.section_preview.setPen(QPen(QColor(pen_col), 1, Qt.DashLine))
+        self.section_preview.setRect(min(a.x(), b.x()), min(y0, y1), abs(b.x() - a.x()), abs(y1 - y0))
 
     def _section_drag_done(self, a, b):
         if self.section_preview is not None:
             self.scene.removeItem(self.section_preview)
             self.section_preview = None
-        bands = range(len(self.engine.bands)) if self.sec_all.isChecked() else [self.sel_band]
-        self._add_sections(bands, a.x(), b.x())
+        if self.tool == "excl":
+            self.add_exclusion_rect(a.x(), a.y(), b.x(), b.y())
+        elif self.tool == "vrange":
+            self.set_verify_range(a.x(), b.x())
+        else:
+            bands = range(len(self.engine.bands)) if self.sec_all.isChecked() else [self.sel_band]
+            self._add_sections(bands, a.x(), b.x())
 
     def _add_sections(self, bands, x0, x1):
         try:

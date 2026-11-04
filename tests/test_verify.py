@@ -141,3 +141,21 @@ def test_excel_has_verification_history_sheet(tmp_path):
     rows = [r for r in ws.iter_rows(min_row=5, values_only=True) if r[0]]
     assert any(r[1] == "引き直しの履歴" for r in rows)
     assert len([r for r in rows if r[1] == "引き直しの履歴"]) == len(b.revisions)
+
+
+def test_range_limits_which_spots_are_repaired(tmp_path):
+    e, _ = _fresh(tmp_path)
+    b = e.bands[0]
+    i1, i2 = len(b.path) // 4, 3 * len(b.path) // 4
+    corrupt = np.concatenate([b.path[:i1], b.path[i1 + 30:i2], b.path[i2 + 30:]])    # two jumps
+    _install(e, b, corrupt)
+    fs = [f for f in find_problems(e, b) if f.kind == "jump"]
+    assert len(fs) == 2
+    xs = sorted(f.x for f in fs)
+    # range around the second spot only: the first spot is not a candidate for repair
+    rep = verify_and_repair(e, 0, max_rounds=3, x_range=(xs[1] - 100, xs[1] + 100))
+    assert rep["range"] == (xs[1] - 100, xs[1] + 100)
+    assert all(not (xs[1] - 100 <= r["x"] <= xs[1] + 100) is True or True for r in b.revisions)
+    assert [r for r in b.revisions if not (xs[1] - 100 <= r["x"] <= xs[1] + 100)] == []    # only spots in range tried
+    assert rep["score_after"] <= rep["score_before"]
+    assert rep["applied"] >= 1

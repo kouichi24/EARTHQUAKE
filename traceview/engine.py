@@ -42,6 +42,7 @@ class Engine:
         self.profile_key = "generic"
         self.section_settings = SectionSettings()
         self.readouts = []          # points read from the trace: dicts {band, x, y} (work px)
+        self.exclusions = []        # rectangles whose ink is ignored (text, stains): dicts {x0, y0, x1, y1} (work px)
 
     # ------------------------------------------------------------------ open
     def open(self, path, page=0, progress=_noop):
@@ -68,6 +69,7 @@ class Engine:
         e.src_path, e.page, e.digest = self.src_path, self.page, self.digest
         e.rgb_orig, e.work, e.scale, e.orig_size = self.rgb_orig, self.work, self.scale, self.orig_size
         e.calibration = Calibration.from_dict(self.calibration.to_dict())
+        e.exclusions = [dict(r) for r in self.exclusions]
         return e
 
     def quality_summary(self):
@@ -102,6 +104,7 @@ class Engine:
             raise EngineError("画像が読み込まれていません")
         progress("画像を前処理中", 0.1)
         self.prepared = prepare(self.work, self.params)
+        self._apply_exclusions()
         progress("線を細線化中", 0.35)
         sk = skeleton_of(self.prepared.ink)
         g = build_graph(sk, self.params.spur_min_len)
@@ -343,16 +346,72 @@ class Engine:
         b.initial = b.snapshot()
         return b
 
+    def _replace_band(self, i, nb):
+        """Swap in a freshly traced band; the old state goes onto the undo stack, logs and sections are kept."""
+        old = self.bands[i]
+        old.push_undo(self.params.undo_limit)
+        nb.undo, nb.redo = old.undo, old.redo
+        nb.sections, nb.revisions, nb.findings = old.sections, old.revisions, old.findings
+        nb.confirmed = False
+        self.bands[i] = nb
+        return nb
+
     def retrace_band_from_origin(self, i, ox, oy):
         """IN-05: manual origin for a band whose automatic start failed."""
         origins = [bd.origin for bd in self.bands]
         origins[i] = (ox, oy)
-        nb = self._trace_new_band(i, origins)
-        old = self.bands[i]
-        nb.undo, nb.redo = old.undo, old.redo
-        nb.push_undo(self.params.undo_limit)
-        self.bands[i] = nb
-        return nb
+        return self._replace_band(i, self._trace_new_band(i, origins))
+
+    # -------------------------------------------------------------- exclusions
+    def _apply_exclusions(self):
+        h, w = self.prepared.ink.shape
+        for r in self.exclusions:
+            x0, x1 = max(0, int(r["x0"])), min(w, int(r["x1"]) + 1)
+            y0, y1 = max(0, int(r["y0"])), min(h, int(r["y1"]) + 1)
+            self.prepared.ink[y0:y1, x0:x1] = False
+
+    def _bands_touching(self, rect, margin=6):
+        x0, y0, x1, y1 = rect["x0"] - margin, rect["y0"] - margin, rect["x1"] + margin, rect["y1"] + margin
+        hit = []
+        for i, b in enumerate(self.bands):
+            p = b.path
+            if len(p) and np.any((p[:, 0] >= x0) & (p[:, 0] <= x1) & (p[:, 1] >= y0) & (p[:, 1] <= y1)):
+                hit.append(i)
+        return hit
+
+    def _retrace_bands(self, idx, progress):
+        origins = [bd.origin for bd in self.bands]
+        for k, i in enumerate(idx):
+            progress(f"{self.bands[i].name}を引き直し中", 0.5 + 0.45 * k / max(1, len(idx)))
+            self._replace_band(i, self._trace_new_band(i, origins))
+
+    def add_exclusion(self, x0, y0, x1, y1, progress=_noop):
+        """Ignore everything inside the rectangle (e.g. letters touching the trace) and re-trace the bands
+        whose line ran through it. Other bands and their edits are not touched."""
+        rect = dict(x0=float(min(x0, x1)), y0=float(min(y0, y1)), x1=float(max(x0, x1)), y1=float(max(y0, y1)))
+        if rect["x1"] - rect["x0"] < 4 or rect["y1"] - rect["y0"] < 4:
+            raise EngineError("除外範囲が小さすぎます")
+        affected = self._bands_touching(rect)
+        self.exclusions.append(rect)
+        self.graph = None
+        self.ensure_graph(progress)
+        self._retrace_bands(affected, progress)
+        return affected
+
+    def remove_exclusion(self, k, progress=_noop):
+        if not (0 <= k < len(self.exclusions)):
+            return []
+        rect = self.exclusions.pop(k)
+        origins = [bd.origin for bd in self.bands]
+        affected = []
+        for i in range(len(self.bands)):
+            corr, _z = self._zone(i, origins) if len(origins) >= 2 else ((rect["y0"], rect["y1"], rect["y0"], rect["y1"]),) * 2
+            if rect["y1"] >= corr[0] - 20 and rect["y0"] <= corr[1] + 20:
+                affected.append(i)
+        self.graph = None
+        self.ensure_graph(progress)
+        self._retrace_bands(affected, progress)
+        return affected
 
     # ---------------------------------------------------------------- routing
     def _route(self, a, b, pad=150):

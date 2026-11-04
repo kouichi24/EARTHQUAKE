@@ -184,7 +184,11 @@ def repair(engine, band, f):
     if node is None:
         return False
     g = engine.graph
-    blocked = _edges_of(engine, prefix) | _edges_of(engine, path[f.i0:f.i1 + 1])
+    blocked = _edges_of(engine, prefix)
+    if f.kind != "jump":
+        # a jump sits on real line edges (the path skipped over a stretch): those must stay usable;
+        # for the other kinds the edges the old path took are the suspect ones
+        blocked |= _edges_of(engine, path[f.i0:f.i1 + 1])
     blocked.discard(edge)
     origins = [b.origin for b in engine.bands]
     corr, zone = engine._zone(band.index, origins)
@@ -237,17 +241,21 @@ def _locate(new_path, f):
     return max(0, k - 40), min(len(new_path) - 1, k + 40)
 
 
-def verify_and_repair(engine, bi, max_rounds=5, max_attempts=40, progress=lambda *a: None, repair_on=True):
+def verify_and_repair(engine, bi, max_rounds=5, max_attempts=40, progress=lambda *a: None, repair_on=True,
+                      x_range=None):
     """Check one band and (optionally) re-trace unnatural spots until the check no longer improves.
 
-    Returns a report dict. All attempts are appended to band.revisions (never removed).
+    x_range=(x0, x1) in work px limits WHICH spots are re-traced; the acceptance test still looks at the whole line,
+    so nothing outside the range may get worse. Returns a report dict. All attempts are appended to band.revisions.
     """
     engine.ensure_graph(progress)
     b = engine.bands[bi]
     t0 = time.time()
     findings = find_problems(engine, b)
     start_score = score(findings)
-    report = dict(band=b.name, rounds=0, attempts=0, applied=0, rejected=0, failed=0,
+    if x_range is not None:
+        x_range = (min(x_range), max(x_range))
+    report = dict(band=b.name, range=x_range, rounds=0, attempts=0, applied=0, rejected=0, failed=0,
                   score_before=start_score, score_after=start_score, findings_before=len(findings))
     if not repair_on:
         b.findings = [f.to_dict() for f in findings]
@@ -257,7 +265,8 @@ def verify_and_repair(engine, bi, max_rounds=5, max_attempts=40, progress=lambda
     tried = set()
     cur = start_score
     for rnd in range(1, max_rounds + 1):
-        cand = [f for f in findings if f.kind in REPAIRABLE and f.key() not in tried]
+        cand = [f for f in findings if f.kind in REPAIRABLE and f.key() not in tried
+                and (x_range is None or x_range[0] <= f.x <= x_range[1])]
         if not cand:
             break
         cand.sort(key=lambda f: -f.weight)
