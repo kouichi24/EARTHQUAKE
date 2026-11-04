@@ -113,3 +113,35 @@ def test_display_uses_light_pyramid_but_analysis_keeps_full_image(win):
     win.view.fit_all()
     win.grab()
     assert item.last_level >= 1
+
+
+def test_image_area_width_can_be_changed(win):
+    from PySide6.QtWidgets import QApplication
+    win.resize(1600, 900)
+    QApplication.processEvents()
+    win.width_slider.setValue(85)
+    QApplication.processEvents()
+    wide = win.view.width()
+    win.width_slider.setValue(40)
+    QApplication.processEvents()
+    narrow = win.view.width()
+    assert wide > narrow + 300                                   # a larger setting really gives a wider image area
+    assert win.dock.width() >= 240                               # the panel never gets unusably thin
+    # hiding the panel gives the image area the whole window; showing it again restores the panel
+    win.a_panel.setChecked(False)
+    win._toggle_panel()
+    QApplication.processEvents()
+    assert not win.dock.isVisible() and win.view.width() > wide
+    win.a_panel.setChecked(True)
+    win._toggle_panel()
+    QApplication.processEvents()
+    assert win.dock.isVisible()
+    win.width_slider.setValue(70)
+
+
+def test_dragging_the_border_updates_the_slider(win):
+    from PySide6.QtWidgets import QApplication
+    win.resizeDocks([win.dock], [500], __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.Horizontal)
+    QApplication.processEvents()
+    win._sync_width_slider()
+    assert abs(win.width_slider.value() - round(100 * (1 - win.dock.width() / win.width()))) <= 1

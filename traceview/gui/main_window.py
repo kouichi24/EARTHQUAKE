@@ -105,6 +105,8 @@ class MainWindow(QMainWindow):
         self.ver_range_item = None
         self._update_enabled()
         self._set_state("読込", "ファイル未選択")
+        if not sync_mode:
+            self._restore_layout()
 
     # ------------------------------------------------------------------ UI build
     def _act(self, text, slot, shortcut=None, checkable=False, tip=None):
@@ -225,6 +227,22 @@ class MainWindow(QMainWindow):
         self.a_prev_v = self._act("◀頂点", lambda: self.step_vertex(-1), "Left")
         self.a_next_v = self._act("頂点▶", lambda: self.step_vertex(1), "Right")
         tb3.addAction(self.a_hide_all)
+        tb3.addSeparator()
+        self.a_panel = self._act("右パネル", self._toggle_panel, "F4", True,
+                                 "右のパネル（測定・頂点・区間など）を表示／隠す。隠すと画像エリアが最大になります")
+        self.a_panel.setChecked(True)
+        tb3.addAction(self.a_panel)
+        tb3.addWidget(QLabel(" 画像エリアの幅 "))
+        self.width_slider = QSlider(Qt.Horizontal)
+        self.width_slider.setRange(30, 90)
+        self.width_slider.setValue(70)
+        self.width_slider.setMaximumWidth(130)
+        self.width_slider.setToolTip("画像エリアの幅（ウィンドウに対する割合 %）。\n画像とパネルの境目を、マウスでドラッグして変えることもできます")
+        self.width_slider.valueChanged.connect(self._width_slider_changed)
+        tb3.addWidget(self.width_slider)
+        self.width_label = QLabel("70%")
+        tb3.addWidget(self.width_label)
+        tb3.addSeparator()
         for a in (self.a_fit, self.a_zoom_sel, self.a_play, self.a_prev_v, self.a_next_v):
             tb3.addAction(a)
         self.speed = QSlider(Qt.Horizontal)
@@ -237,6 +255,8 @@ class MainWindow(QMainWindow):
     def _build_docks(self):
         # band list + tabs
         dock = QDockWidget("波形・測定・確認", self)
+        self.dock = dock
+        dock.setObjectName("main_dock")
         dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -489,9 +509,12 @@ class MainWindow(QMainWindow):
         note.setWordWrap(True)
         cl.addRow(note)
         self.tabs.addTab(cw, "校正")
+        for lab in w.findChildren(QLabel):       # long explanatory texts must wrap, or they force the panel wide
+            lab.setWordWrap(True)
         dock.setWidget(w)
-        dock.setMinimumWidth(430)
+        dock.setMinimumWidth(240)          # narrow enough to give the image area most of the window
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self.resizeDocks([dock], [430], Qt.Horizontal)
 
     def _build_status(self):
         sb = self.statusBar()
@@ -904,8 +927,54 @@ class MainWindow(QMainWindow):
         r = QMessageBox.question(self, "TraceView", "保存していない変更があります。破棄して続けますか？")
         return r == QMessageBox.Yes
 
+    # ------------------------------------------------------------ layout (width of the image area)
+    def _toggle_panel(self, *_):
+        self.dock.setVisible(self.a_panel.isChecked())
+
+    def _width_slider_changed(self, v):
+        """Set the image area to v % of the window by resizing the right panel."""
+        self.width_label.setText(f"{v}%")
+        if not self.dock.isVisible():
+            return
+        total = max(1, self.width())
+        self.resizeDocks([self.dock], [max(240, int(total * (100 - v) / 100))], Qt.Horizontal)
+        QTimer.singleShot(0, self._sync_width_slider)      # show the width that was really possible
+
+    def _sync_width_slider(self):
+        """Keep the slider in step when the border between image and panel is dragged with the mouse."""
+        if not self.dock.isVisible() or self.width() <= 0:
+            return
+        v = int(round(100 * (1 - self.dock.width() / self.width())))
+        v = max(self.width_slider.minimum(), min(self.width_slider.maximum(), v))
+        self.width_slider.blockSignals(True)
+        self.width_slider.setValue(v)
+        self.width_slider.blockSignals(False)
+        self.width_label.setText(f"{v}%")
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._sync_width_slider()
+
+    def _save_layout(self):
+        st = QSettings("TraceView", "TraceView")
+        st.setValue("geometry", self.saveGeometry())
+        st.setValue("windowState", self.saveState())
+
+    def _restore_layout(self):
+        st = QSettings("TraceView", "TraceView")
+        try:
+            g, ws = st.value("geometry"), st.value("windowState")
+            if g:
+                self.restoreGeometry(g)
+            if ws:
+                self.restoreState(ws)
+            self.a_panel.setChecked(self.dock.isVisible())
+        except Exception:                      # a damaged saved layout is simply ignored
+            pass
+
     def closeEvent(self, ev):
         if self._confirm_discard():
+            self._save_layout()
             ev.accept()
         else:
             ev.ignore()
