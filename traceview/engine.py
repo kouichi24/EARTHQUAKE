@@ -92,6 +92,8 @@ class Engine:
         h, w = self.rgb_orig.shape[:2]
         self.orig_size = (w, h)
         self.work, self.scale = make_work_image(self.rgb_orig, self.params.work_max_side)
+        if self.work is not self.rgb_orig:
+            self.rgb_orig = None       # the analysis image is enough; the original file stays untouched on disk (lighter in memory)
         self.prepared = None
         self.graph = None
         self.bands = []

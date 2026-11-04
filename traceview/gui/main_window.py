@@ -24,7 +24,7 @@ from ..profiles import PROFILES, get as get_profile
 from ..project import SourceMismatch, load_project, save_project
 from ..svg_out import export_svg
 from ..verify import KINDS as VERIFY_KINDS, find_problems, verify_and_repair
-from .view import ImageView, LineItem, VertexItem, make_path_item, polyline_path
+from .view import ImageView, LineItem, PyramidItem, VertexItem, make_path_item, polyline_path
 
 ISSUE_LABEL = {"ambiguous": "所属の曖昧さ", "untracked_end": "末端の未追跡", "inferred": "推定接続",
                "excursion": "他の段への逸脱", "no_origin": "起点未検出", "retrace_failed": "再追跡の失敗",
@@ -927,9 +927,7 @@ class MainWindow(QMainWindow):
         if e.work is None:
             return
         h, w = e.work.shape[:2]
-        self._img_data = np.ascontiguousarray(e.work)
-        qimg = QImage(self._img_data.data, w, h, 3 * w, QImage.Format_RGB888)
-        self.pix_item = QGraphicsPixmapItem(QPixmap.fromImage(qimg))
+        self.pix_item = PyramidItem(e.work)        # light display copies; analysis keeps the full image
         self.pix_item.setZValue(0)
         self.scene.addItem(self.pix_item)
         self.scene.setSceneRect(0, 0, w, h)

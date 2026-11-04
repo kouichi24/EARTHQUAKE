@@ -94,3 +94,23 @@ def test_dragged_vertex_item_stays_on_the_line(win):
     p = item.pos()
     assert win.engine.graph.skel[int(round(p.y())), int(round(p.x()))]     # the vertex is still on the line
     item.setPos(QPointF(x, y))
+
+
+def test_display_uses_light_pyramid_but_analysis_keeps_full_image(win):
+    from traceview.gui.view import PyramidItem
+    item = win.pix_item
+    assert isinstance(item, PyramidItem)
+    sizes = [pm.width() for pm in item.pixmaps]
+    assert sizes[0] == win.engine.work.shape[1]                       # level 0 = the full analysis image
+    assert all(sizes[k + 1] <= sizes[k] // 2 + 1 for k in range(len(sizes) - 1))
+    assert PyramidItem.level_for_scale(1.5) == 0                      # zoomed in: full detail
+    assert PyramidItem.level_for_scale(0.3) >= 1                      # zoomed out: light copy
+    assert PyramidItem.level_for_scale(0.05) == PyramidItem.LEVELS - 1
+    # drawing works at both zooms
+    win.view.center_on_point(600, 250, zoom=1.5)
+    win.grab()
+    assert item.last_level == 0
+    win.view.fit_all()
+    win.grab()
+    assert item.last_level >= 1
+    assert win.engine.rgb_orig is None or win.engine.rgb_orig is not win.engine.work

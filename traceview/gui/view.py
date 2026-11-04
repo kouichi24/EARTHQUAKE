@@ -1,7 +1,10 @@
 """Graphics view and items for the comparison canvas (UI-02, UI-03)."""
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsPathItem,
+import cv2
+import numpy as np
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem, QGraphicsLineItem, QGraphicsPathItem,
                                QGraphicsView)
 
 
@@ -75,6 +78,45 @@ class ImageView(QGraphicsView):
             self.dragMoved.emit(self._drag_start, self.mapToScene(ev.position().toPoint()))
             return
         super().mouseMoveEvent(ev)
+
+
+class PyramidItem(QGraphicsItem):
+    """The sheet image for display. Smaller copies (1/2, 1/4, 1/8) are made once, and the one that fits the current
+    zoom is drawn, so panning and zooming stay light even for a very large scan. Analysis always uses the full image."""
+
+    LEVELS = 4
+
+    def __init__(self, rgb):
+        super().__init__()
+        self.h, self.w = rgb.shape[:2]
+        self.pixmaps = []
+        img = np.ascontiguousarray(rgb)
+        for k in range(self.LEVELS):
+            if k:
+                img = cv2.resize(img, (max(1, img.shape[1] // 2), max(1, img.shape[0] // 2)), interpolation=cv2.INTER_AREA)
+            qi = QImage(img.data, img.shape[1], img.shape[0], 3 * img.shape[1], QImage.Format_RGB888)
+            self.pixmaps.append(QPixmap.fromImage(qi))        # copies the data
+        self.last_level = 0
+        self.setZValue(0)
+
+    def boundingRect(self):
+        return QRectF(0, 0, self.w, self.h)
+
+    @staticmethod
+    def level_for_scale(s, levels=LEVELS):
+        """Pyramid level for a zoom of s device px per image px: the smallest copy that is still sharp enough."""
+        k = 0
+        while k + 1 < levels and s < 0.75 / (2 ** (k + 1)) * 2:
+            k += 1
+        return k
+
+    def paint(self, painter, option, widget=None):
+        s = abs(painter.worldTransform().m11())
+        k = self.level_for_scale(s)
+        self.last_level = k
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        pm = self.pixmaps[k]
+        painter.drawPixmap(QRectF(0, 0, self.w, self.h), pm, QRectF(0, 0, pm.width(), pm.height()))
 
 
 def polyline_path(pts, step=1):
