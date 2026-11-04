@@ -38,6 +38,7 @@
 
 | 症状 | 対処 |
 |---|---|
+| `No module named 'cv2'` など（ライブラリがない） | そのPCのPythonに、ライブラリが入っていません。`run_windows.bat` は初回に自動で導入します（ネットワークが必要）。手動なら `py -3 -m pip install -r requirements.txt` |
 | `python` が見つからない | Python を再インストールし「Add python.exe to PATH」を有効にする |
 | `pip install` が失敗 | ネットワーク／プロキシを確認。社内のプロキシ設定が必要な場合は管理者に確認 |
 | exe がウイルス対策ソフトに止められる | PyInstaller 製 exe は誤検知されることがあります。社内のセキュリティ担当に確認し、許可リストへ登録 |
