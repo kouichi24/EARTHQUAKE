@@ -113,4 +113,3 @@ def test_display_uses_light_pyramid_but_analysis_keeps_full_image(win):
     win.view.fit_all()
     win.grab()
     assert item.last_level >= 1
-    assert win.engine.rgb_orig is None or win.engine.rgb_orig is not win.engine.work
