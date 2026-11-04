@@ -1,0 +1,79 @@
+import os
+import sys
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+import cv2  # noqa: E402
+import pytest  # noqa: E402
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+pytest.importorskip("PySide6")
+from PySide6.QtWidgets import QApplication  # noqa: E402
+from tests.synth import make_sheet  # noqa: E402
+from traceview.gui.main_window import MainWindow  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def win(tmp_path_factory):
+    app = QApplication.instance() or QApplication([])
+    rgb, _ = make_sheet()
+    p = tmp_path_factory.mktemp("gui") / "s.png"
+    cv2.imwrite(str(p), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    w = MainWindow(sync_mode=True)
+    w.show()
+    w.open_file(str(p))
+    w.action_analyze()
+    w.engine.add_section(0, 300, 900)
+    w.engine.read_point(0, float(w.engine.bands[0].path[500][0]), float(w.engine.bands[0].path[500][1]))
+    w.view.center_on_point(600, 250, zoom=1.0)        # zoomed in so that vertices are shown too
+    w._build_all_items()
+    yield w
+    w.close()
+
+
+def _overlay_items(w):
+    out = []
+    for d in w.band_items.values():
+        for key in ("path", "inferred", "vertices", "lines", "issues", "pending", "sections", "arc", "reads"):
+            v = d.get(key)
+            if isinstance(v, dict):
+                v = list(v.values())
+            if v is None:
+                continue
+            out += v if isinstance(v, list) else [v]
+    return out
+
+
+def test_hide_all_hides_every_overlay_but_keeps_the_data(win):
+    items = _overlay_items(win)
+    assert len(items) > 50
+    n_bands, n_vertices = len(win.engine.bands), sum(len(b.vertices) for b in win.engine.bands)
+    assert any(it.isVisible() for it in items)
+    win.a_hide_all.setChecked(True)
+    win.apply_visibility()
+    assert not any(it.isVisible() for it in items)
+    assert win.pix_item.isVisible()                       # the plain image stays
+    assert "表示に戻す" in win.a_hide_all.text()
+    # nothing was deleted
+    assert len(win.engine.bands) == n_bands
+    assert sum(len(b.vertices) for b in win.engine.bands) == n_vertices
+    assert win.engine.bands[0].sections and win.engine.readouts
+
+
+def test_toggle_back_restores_the_overlay(win):
+    win.a_hide_all.setChecked(True)
+    win.apply_visibility()
+    win.a_hide_all.setChecked(False)
+    win.apply_visibility()
+    items = _overlay_items(win)
+    assert sum(it.isVisible() for it in items) > 50
+    assert "全部消す" in win.a_hide_all.text()
+
+
+def test_stays_hidden_after_a_new_edit_redraws_items(win):
+    win.a_hide_all.setChecked(True)
+    win.apply_visibility()
+    win._build_band_items(0)
+    win.apply_visibility()
+    assert not any(it.isVisible() for it in _overlay_items(win))
+    win.a_hide_all.setChecked(False)
+    win.apply_visibility()

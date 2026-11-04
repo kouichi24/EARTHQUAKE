@@ -200,11 +200,14 @@ class MainWindow(QMainWindow):
             cb.toggled.connect(self.apply_visibility)
             tb3.addWidget(cb)
         tb3.addSeparator()
+        self.a_hide_all = self._act("図形を全部消す", self.apply_visibility, "H", True,
+                                    "トレース・頂点・測定線・区間・印をすべて一時的に隠し、元画像だけを表示（データは消えません）。もう一度押すと戻ります")
         self.a_fit = self._act("全体表示", self.view.fit_all, "Ctrl+0")
         self.a_zoom_sel = self._act("選択頂点へ拡大", self.zoom_to_selected, "Z")
         self.a_play = self._act("再生", self.toggle_replay, "Space", True, "復元順に経路を再生")
         self.a_prev_v = self._act("◀頂点", lambda: self.step_vertex(-1), "Left")
         self.a_next_v = self._act("頂点▶", lambda: self.step_vertex(1), "Right")
+        tb3.addAction(self.a_hide_all)
         for a in (self.a_fit, self.a_zoom_sel, self.a_play, self.a_prev_v, self.a_next_v):
             tb3.addAction(a)
         self.speed = QSlider(Qt.Horizontal)
@@ -971,13 +974,19 @@ class MainWindow(QMainWindow):
         self.band_items[bi] = d
 
     def apply_visibility(self, *_):
+        hide = self.a_hide_all.isChecked()
+        self.a_hide_all.setText("図形を表示に戻す" if hide else "図形を全部消す")
+        for extra in (self.sel_ring, self.replay_marker, self.section_preview):
+            if extra is not None and extra.scene() is self.scene:
+                extra.setVisible(not hide)
         if self.pix_item is not None:
             self.pix_item.setVisible(self.cb_image.isChecked())
             self.scene.setBackgroundBrush(QBrush(QColor("white"))) if not self.cb_image.isChecked() else None
         # thousands of vertex markers are unreadable when zoomed out: show them from a moderate zoom
         zoomed = self.view.transform().m11() >= 0.4
         for bi, d in self.band_items.items():
-            vis_band = self.band_list.item(bi) is not None and self.band_list.item(bi).checkState() == Qt.Checked
+            vis_band = (self.band_list.item(bi) is not None and self.band_list.item(bi).checkState() == Qt.Checked
+                        and not hide)
             tr = self.cb_trace.isChecked() and vis_band
             if d["path"] is not None:
                 d["path"].setVisible(tr)
