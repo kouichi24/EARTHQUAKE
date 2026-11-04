@@ -61,6 +61,8 @@ def save_project(engine, path):
         d = _snap_to_json(b.snapshot())
         d.update(index=b.index, name=b.name, color=b.color, origin=list(b.origin))
         d["initial"] = _snap_to_json(b.initial) if b.initial else None
+        d["revisions"] = b.revisions
+        d["findings"] = b.findings
         d["undo"] = [_snap_to_json(s) for s in b.undo[-HISTORY_KEEP:]]
         d["redo"] = [_snap_to_json(s) for s in b.redo[-HISTORY_KEEP:]]
         doc["bands"].append(d)
@@ -95,6 +97,8 @@ def load_project(engine, path, source_path=None, progress=lambda *a: None):
         b = Band(d["index"], d["name"], d["color"], tuple(d["origin"]), d["y0"])
         b.restore(_snap_from_json(d))
         b.initial = _snap_from_json(d["initial"]) if d.get("initial") else None
+        b.revisions = list(d.get("revisions", []))
+        b.findings = list(d.get("findings", []))
         b.undo = [_snap_from_json(s) for s in d.get("undo", [])]
         b.redo = [_snap_from_json(s) for s in d.get("redo", [])]
         engine.bands.append(b)

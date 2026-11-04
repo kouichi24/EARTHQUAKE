@@ -23,10 +23,12 @@ from ..measure import COUNT_MODES, Calibration, arc_active, corrected_path, corr
 from ..profiles import PROFILES, get as get_profile
 from ..project import SourceMismatch, load_project, save_project
 from ..svg_out import export_svg
+from ..verify import KINDS as VERIFY_KINDS, find_problems, verify_and_repair
 from .view import ImageView, LineItem, VertexItem, make_path_item, polyline_path
 
 ISSUE_LABEL = {"ambiguous": "所属の曖昧さ", "untracked_end": "末端の未追跡", "inferred": "推定接続",
-               "excursion": "他の段への逸脱", "no_origin": "起点未検出", "retrace_failed": "再追跡の失敗"}
+               "excursion": "他の段への逸脱", "no_origin": "起点未検出", "retrace_failed": "再追跡の失敗",
+               "verify": "検証"}
 FILE_FILTER = "波形画像 (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp);;すべてのファイル (*)"
 
 
@@ -96,6 +98,7 @@ class MainWindow(QMainWindow):
         self.view.dragMoved.connect(self._section_drag_preview)
         self.view.dragFinished.connect(self._section_drag_done)
         self.section_preview = None
+        self.rev_items = []
         self._update_enabled()
         self._set_state("読込", "ファイル未選択")
 
@@ -164,11 +167,14 @@ class MainWindow(QMainWindow):
         for a in (self.t_select, self.t_add, self.t_origin, self.t_section, self.t_read):
             tb2.addAction(a)
         tb2.addSeparator()
+        self.a_verify = self._act("検証して引き直す", lambda: self.action_verify(True), "F7",
+                                  tip="トレース線の不自然な所を検証し、引き直して、また検証（上限回数まで）。引き直した結果は履歴に残ります")
         self.a_apply = self._act("再追跡を適用", self.action_apply, "Ctrl+Return")
         self.a_cancel_pending = self._act("修正を取り消す", self.action_cancel_pending, "Esc")
         self.cb_auto = QCheckBox("移動後に自動で再追跡")
         self.cb_auto.setChecked(True)
         self.cb_auto.toggled.connect(lambda v: setattr(self, "auto_retrace", v))
+        tb2.addAction(self.a_verify)
         tb2.addAction(self.a_apply)
         tb2.addAction(self.a_cancel_pending)
         tb2.addWidget(self.cb_auto)
@@ -323,6 +329,43 @@ class MainWindow(QMainWindow):
         self.sec_note.setWordWrap(True)
         sl.addWidget(self.sec_note)
         self.tabs.addTab(sw, "区間")
+        # verify tab
+        vw2 = QWidget()
+        vl2 = QVBoxLayout(vw2)
+        vl2.addWidget(QLabel("トレース線を検証し、不自然な所を引き直します。引き直した結果は、採用・不採用を問わず下の履歴に残ります。"))
+        rowv = QHBoxLayout()
+        self.ver_rounds = QSpinBox()
+        self.ver_rounds.setRange(1, 20)
+        self.ver_rounds.setValue(5)
+        self.ver_rounds.setPrefix("最大 ")
+        self.ver_rounds.setSuffix(" 回")
+        self.ver_all = QCheckBox("全段")
+        bchk = QPushButton("検証のみ")
+        bchk.clicked.connect(lambda: self.action_verify(False))
+        brun = QPushButton("検証して引き直す")
+        brun.clicked.connect(lambda: self.action_verify(True))
+        for w_ in (self.ver_rounds, self.ver_all, bchk, brun):
+            rowv.addWidget(w_)
+        vl2.addLayout(rowv)
+        vl2.addWidget(QLabel("現在の不自然な箇所（ダブルクリックで移動）"))
+        self.find_table = QTableWidget(0, 4)
+        self.find_table.setHorizontalHeaderLabels(["種類", "X", "Y", "内容"])
+        self.find_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.find_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.find_table.cellDoubleClicked.connect(self.on_finding_activated)
+        vl2.addWidget(self.find_table, 1)
+        vl2.addWidget(QLabel("引き直しの履歴（選ぶと、引き直し前＝灰色の点線／後＝緑の線を表示。消えません）"))
+        self.rev_table = QTableWidget(0, 7)
+        self.rev_table.setHorizontalHeaderLabels(["実行", "回", "種類", "X", "Y", "結果", "点数 前→後"])
+        self.rev_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.rev_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.rev_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.rev_table.itemSelectionChanged.connect(self.on_revision_row)
+        vl2.addWidget(self.rev_table, 1)
+        self.ver_note = QLabel("")
+        self.ver_note.setWordWrap(True)
+        vl2.addWidget(self.ver_note)
+        self.tabs.addTab(vw2, "検証")
         # read tab
         rw = QWidget()
         rl = QVBoxLayout(rw)
@@ -451,7 +494,7 @@ class MainWindow(QMainWindow):
         self.cb_gap.setChecked(self.engine.params.gap_mode != "off")
         self.cb_gap.blockSignals(False)
         self._sync_profile_combo()
-        for a in (self.a_save, self.a_xlsx, self.a_svg, self.a_undo, self.a_redo, self.a_reset, self.a_apply,
+        for a in (self.a_save, self.a_xlsx, self.a_svg, self.a_undo, self.a_redo, self.a_reset, self.a_apply, self.a_verify,
                   self.a_cancel_pending, self.t_add, self.t_origin, self.t_section, self.t_read, self.a_play, self.a_prev_v, self.a_next_v,
                   self.a_zoom_sel):
             a.setEnabled(has_b)
@@ -817,6 +860,7 @@ class MainWindow(QMainWindow):
         self.band_items.clear()
         self.sel_ring = None
         self.replay_marker = None
+        self.rev_items = []
         self.pix_item = None
         if e.work is None:
             return
@@ -976,7 +1020,7 @@ class MainWindow(QMainWindow):
     def apply_visibility(self, *_):
         hide = self.a_hide_all.isChecked()
         self.a_hide_all.setText("図形を表示に戻す" if hide else "図形を全部消す")
-        for extra in (self.sel_ring, self.replay_marker, self.section_preview):
+        for extra in (self.sel_ring, self.replay_marker, self.section_preview, *self.rev_items):
             if extra is not None and extra.scene() is self.scene:
                 extra.setVisible(not hide)
         if self.pix_item is not None:
@@ -1043,6 +1087,7 @@ class MainWindow(QMainWindow):
         self.update_issue_list()
         self.update_section_table()
         self.update_read_table()
+        self.update_verify_tables()
         b = self.current_band()
         self.cb_confirm.blockSignals(True)
         self.cb_confirm.setChecked(bool(b and b.confirmed))
@@ -1358,6 +1403,102 @@ class MainWindow(QMainWindow):
         self.dirty = True
         self.update_measure_table()
         self._update_review_label()
+
+    # --------------------------------------------------------------- verify
+    def action_verify(self, repair=True):
+        e = self.engine
+        if not e.bands:
+            return
+        targets = list(range(len(e.bands))) if self.ver_all.isChecked() else [self.sel_band]
+        rounds = self.ver_rounds.value()
+        self._set_state("再追跡", "検証中…")
+        self.reports = []
+
+        def job(cb):
+            out = []
+            for k, bi in enumerate(targets):
+                out.append(verify_and_repair(e, bi, max_rounds=rounds,
+                                             progress=lambda m, f, k=k: cb(m, (k + f) / len(targets)),
+                                             repair_on=repair))
+            return out
+
+        def done(reports):
+            self.reports = reports
+            self.dirty = True
+            for bi in targets:
+                self._build_band_items(bi)
+            self.apply_visibility()
+            self.refresh_panels()
+            self.tabs.setCurrentWidget(self.find_table.parentWidget())
+            self._set_state("再追跡", "検証完了" if not repair else "検証・引き直し完了")
+            lines = [f"{r['band']}: 採用{r['applied']}・不採用{r['rejected']}・失敗{r['failed']}　"
+                     f"点数 {r['score_before']:.0f}→{r['score_after']:.0f}" if repair else
+                     f"{r['band']}: 不自然な箇所 {r['findings_before']}件" for r in reports]
+            self._info(" ／ ".join(lines))
+
+        self.run_task("検証しています…", job, done,
+                      lambda m: (self._set_state("再追跡", "失敗"), self._show_error(m)))
+
+    def update_verify_tables(self):
+        b = self.current_band()
+        ft, rt = self.find_table, self.rev_table
+        ft.setRowCount(0)
+        rt.blockSignals(True)
+        rt.setRowCount(0)
+        if b is None:
+            rt.blockSignals(False)
+            return
+        inv = 1 / self.engine.scale
+        ft.setRowCount(len(b.findings))
+        for i, f in enumerate(b.findings):
+            for c, txt in enumerate([VERIFY_KINDS.get(f["kind"], f["kind"]), f"{f['x'] * inv:.0f}", f"{f['y'] * inv:.0f}", f["msg"]]):
+                ft.setItem(i, c, QTableWidgetItem(txt))
+            ft.item(i, 0).setData(Qt.UserRole, (f["x"], f["y"]))
+        ft.resizeColumnsToContents()
+        status = {"applied": "採用", "rejected": "不採用（元に戻した）", "failed": "引き直せず"}
+        rt.setRowCount(len(b.revisions))
+        for i, r in enumerate(b.revisions):
+            vals = [str(r["run"]), str(r["round"]), VERIFY_KINDS.get(r["kind"], r["kind"]), f"{r['x'] * inv:.0f}",
+                    f"{r['y'] * inv:.0f}", status.get(r["status"], r["status"]),
+                    f"{r['score_before']:.0f} → {r['score_after']:.0f}"]
+            for c, txt in enumerate(vals):
+                rt.setItem(i, c, QTableWidgetItem(txt))
+        rt.resizeColumnsToContents()
+        rt.blockSignals(False)
+        n_app = sum(1 for r in b.revisions if r["status"] == "applied")
+        self.ver_note.setText(f"{b.name}: 履歴 {len(b.revisions)}件（採用 {n_app}）。引き直しの実行全体は「戻す」(Ctrl+Z)で一度に取り消せます（履歴は残ります）。"
+                              "点数は不自然さの目安で、小さいほど良いですが、正しさの保証ではありません。")
+
+    def on_finding_activated(self, row, _col):
+        x, y = self.find_table.item(row, 0).data(Qt.UserRole)
+        self.view.center_on_point(x, y, zoom=max(0.8, self.view.transform().m11()))
+
+    def _clear_rev_items(self):
+        for it in self.rev_items:
+            if it.scene() is self.scene:
+                self.scene.removeItem(it)
+        self.rev_items = []
+
+    def on_revision_row(self):
+        self._clear_rev_items()
+        rows = self.rev_table.selectionModel().selectedRows()
+        b = self.current_band()
+        if not rows or b is None or rows[0].row() >= len(b.revisions):
+            return
+        r = b.revisions[rows[0].row()]
+        if r["old"]:
+            it = make_path_item(polyline_path(r["old"]), "#757575", 3, z=48)
+            pen = it.pen()
+            pen.setStyle(Qt.DotLine)
+            it.setPen(pen)
+            self.scene.addItem(it)
+            self.rev_items.append(it)
+        if r["new"]:
+            it = make_path_item(polyline_path(r["new"]), "#00c853" if r["status"] == "applied" else "#ff6d00", 3, z=49)
+            self.scene.addItem(it)
+            self.rev_items.append(it)
+        self.apply_visibility()
+        self.view.center_on_point(r["x"], r["y"], zoom=max(1.0, self.view.transform().m11()))
 
     # --------------------------------------------------------------- readouts
     @staticmethod

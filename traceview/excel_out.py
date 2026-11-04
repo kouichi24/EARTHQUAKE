@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 from . import __version__
 from .measure import COUNT_MODES, arc_active, arc_corrected_x_mm, corrected_path
 from .profiles import get as get_profile
+from .verify import KINDS as VERIFY_KINDS
 
 SRC_LABEL = {"auto": "自動取得", "manual": "手動頂点", "retrace": "再追跡"}
 
@@ -265,6 +266,29 @@ def export_xlsx(engine, out_path, include_all_points=False):
     wsr.freeze_panes = "A2"
     for c in range(1, len(hr) + 1):
         wsr.column_dimensions[get_column_letter(c)].width = 16
+
+    # ---- sheet: self-check findings and the log of every re-tracing attempt (kept and rejected)
+    wsv = wb.create_sheet("検証履歴")
+    wsv["A1"] = "トレース線の検証と引き直しの履歴"
+    wsv["A1"].font = Font(bold=True, size=13)
+    wsv["A2"] = "点数は不自然さの目安（小さいほど良い）。正しさの保証ではありません。不採用の引き直しも消さずに残しています。"
+    hv = ["段", "区分", "実行", "回", "種類", "X[px]", "Y[px]", "結果", "点数(前)", "点数(後)", "内容"]
+    for c, h in enumerate(hv, 1):
+        cell = wsv.cell(4, c, h)
+        cell.font = bold
+        cell.fill = hdr_fill
+    status = {"applied": "採用", "rejected": "不採用(元に戻した)", "failed": "引き直せず"}
+    for b in engine.bands:
+        for f in b.findings:
+            wsv.append([b.name, "現在の不自然な箇所", None, None, VERIFY_KINDS.get(f["kind"], f["kind"]),
+                        round(f["x"] * inv, 1), round(f["y"] * inv, 1), "未解決", None, None, f["msg"]])
+        for r in b.revisions:
+            wsv.append([b.name, "引き直しの履歴", r["run"], r["round"], VERIFY_KINDS.get(r["kind"], r["kind"]),
+                        round(r["x"] * inv, 1), round(r["y"] * inv, 1), status.get(r["status"], r["status"]),
+                        r["score_before"], r["score_after"], r["msg"]])
+    for w_, col in zip((10, 18, 8, 6, 24, 10, 10, 18, 10, 10, 50), "ABCDEFGHIJK"):
+        wsv.column_dimensions[col].width = w_
+    wsv.freeze_panes = "A5"
 
     # ---- sheet 4: issues
     ws4 = wb.create_sheet("要確認")

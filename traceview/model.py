@@ -44,6 +44,8 @@ class Band:
     complete: bool = False           # trace reached the end of the paper
     confirmed: bool = False          # user confirmed the reading (MS-04)
     issues: list = field(default_factory=list)
+    revisions: list = field(default_factory=list)     # append-only log of re-tracing attempts (kept and rejected)
+    findings: list = field(default_factory=list)      # last result of the self-check
     undo: list = field(default_factory=list)
     redo: list = field(default_factory=list)
     initial: dict = None
