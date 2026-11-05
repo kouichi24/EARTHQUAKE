@@ -43,6 +43,7 @@ class Band:
     end_x: float = 0.0
     complete: bool = False           # trace reached the end of the paper
     confirmed: bool = False          # user confirmed the reading (MS-04)
+    traced: bool = True              # False for a band that waits to be traced (step-by-step mode)
     issues: list = field(default_factory=list)
     revisions: list = field(default_factory=list)     # append-only log of re-tracing attempts (kept and rejected)
     findings: list = field(default_factory=list)      # last result of the self-check

@@ -38,8 +38,9 @@ def _heading(pix, from_start, k=K_HEAD):
 class Walker:
     """Directed-edge walk: every skeleton edge is traversed at most once per direction."""
 
-    def __init__(self, graph, params, corridor=None, spur_max=220, ref_zone=None):
+    def __init__(self, graph, params, corridor=None, spur_max=220, ref_zone=None, occupied=None):
         self.g = graph
+        self.occupied = occupied or set()   # edges taken by other bands: a later band avoids them
         self.ref_zone = ref_zone
         self._refpen = {}
         self.p = params
@@ -61,6 +62,8 @@ class Walker:
         if far.kind == "end" and e.length <= self.spur_max:
             s += 0.9                                   # visit spike tips before moving on
         s -= self._ref_penalty(eid)
+        if eid in self.occupied:
+            s -= 1.6
         if self.corridor is not None:
             lo_s, hi_s, lo_h, hi_h = self.corridor
             if far.y < lo_s or far.y > hi_s:

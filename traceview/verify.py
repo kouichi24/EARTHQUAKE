@@ -65,7 +65,7 @@ def find_problems(engine, band):
     """Unnatural spots of the traced line of one band."""
     path = band.path
     out = []
-    if len(path) < 3:
+    if len(path) < 3 or not band.traced:
         return out
     if getattr(engine, "_ink_dil", None) is None or engine._ink_dil.shape != engine.ink.shape:
         engine._ink_dil = cv2.dilate(engine.ink.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
@@ -184,6 +184,7 @@ def repair(engine, band, f):
     if node is None:
         return False
     g = engine.graph
+    engine._tracing_band = band.index
     blocked = _edges_of(engine, prefix)
     if f.kind != "jump":
         # a jump sits on real line edges (the path skipped over a stretch): those must stay usable;

@@ -28,7 +28,7 @@ from .view import ImageView, LineItem, PyramidItem, VertexItem, make_path_item, 
 
 ISSUE_LABEL = {"ambiguous": "所属の曖昧さ", "untracked_end": "末端の未追跡", "inferred": "推定接続",
                "excursion": "他の段への逸脱", "no_origin": "起点未検出", "retrace_failed": "再追跡の失敗",
-               "verify": "検証"}
+               "verify": "検証", "not_traced": "未解析", "shared_line": "確認済みの段と線が重なる"}
 FILE_FILTER = "波形画像 (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp);;すべてのファイル (*)"
 
 
@@ -137,6 +137,8 @@ class MainWindow(QMainWindow):
         self.profile_combo.setToolTip("記録方式の設定。方式が分からないときは「方式を探す」で数種類を試せます")
         self.profile_combo.setMaximumWidth(280)
         self.profile_combo.activated.connect(self._profile_chosen)
+        self.cb_step = QCheckBox("一段ずつ順番に解析")
+        self.cb_step.setToolTip("オン: 自動解析で、まず上段だけを解析します。確認・修正してから「次の段を解析」(F8)で、\n次の段へ進みます（確認済みの段の線は、あとの段が使いません）。オフ: 上段から順に、まとめて解析します")
         self.cb_gap = QCheckBox("途切れを推定でつなぐ")
         self.cb_gap.setChecked(True)
         self.cb_gap.setToolTip("オン: 画像に薄い線の痕跡がある所だけ推定でつなぐ（黄色の破線で表示）。\nオフ: 途切れはつながず、未追跡として示す")
@@ -152,6 +154,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.page_spin)
         tb.addWidget(self.profile_combo)
         tb.addWidget(self.cb_gap)
+        tb.addWidget(self.cb_step)
         for a in (self.a_analyze, self.a_compare, self.a_save, self.a_load, self.a_xlsx, self.a_svg):
             tb.addAction(a)
         tb.addSeparator()
@@ -177,6 +180,10 @@ class MainWindow(QMainWindow):
         tb2.addSeparator()
         self.a_verify = self._act("検証して引き直す", lambda: self.action_verify(True), "F7",
                                   tip="トレース線の不自然な所を検証し、引き直して、また検証（上限回数まで）。引き直した結果は履歴に残ります")
+        self.a_next_band = self._act("次の段を解析", self.action_next_band, "F8",
+                                     tip="まだ解析していない次の段を解析します（前の段の線は避けます。確認済みの段の線は使いません）")
+        self.a_follow = self._act("後の段を引き直す", self.action_retrace_following, None,
+                                  tip="選択中の段を直したあと、それより下の段を、直した線を避けて引き直します")
         self.a_apply = self._act("再追跡を適用", self.action_apply, "Ctrl+Return")
         self.a_cancel_pending = self._act("修正を取り消す", self.action_cancel_pending, "Esc")
         self.cb_follow = QCheckBox("線に沿って動かす")
@@ -186,6 +193,8 @@ class MainWindow(QMainWindow):
         self.cb_auto = QCheckBox("移動後に自動で再追跡")
         self.cb_auto.setChecked(True)
         self.cb_auto.toggled.connect(lambda v: setattr(self, "auto_retrace", v))
+        tb2.addAction(self.a_next_band)
+        tb2.addAction(self.a_follow)
         tb2.addAction(self.a_verify)
         tb2.addAction(self.a_apply)
         tb2.addAction(self.a_cancel_pending)
@@ -560,6 +569,7 @@ class MainWindow(QMainWindow):
         has_b = bool(self.engine.bands)
         self.a_analyze.setEnabled(has_img)
         self.a_compare.setEnabled(has_img)
+        self._update_step_actions()
         self.profile_combo.setEnabled(has_img)
         self.cb_gap.setEnabled(has_img)
         self.cb_gap.blockSignals(True)
@@ -674,7 +684,7 @@ class MainWindow(QMainWindow):
 
         def job(cb):
             e.graph = None
-            return e.analyze(progress=cb)
+            return e.analyze(progress=cb, stepwise=self.cb_step.isChecked())
 
         def done(_b):
             self.dirty = True
@@ -710,6 +720,60 @@ class MainWindow(QMainWindow):
         self.rebuild_scene()
         self._update_enabled()
         self.action_analyze(force=True)
+
+    # ------------------------------------------------ one band after the other
+    def _update_step_actions(self):
+        e = self.engine
+        self.a_next_band.setEnabled(bool(e.bands) and bool(e.untraced_bands()))
+        self.a_follow.setEnabled(bool(e.bands) and self.sel_band < len(e.bands) - 1)
+        left = len(e.untraced_bands()) if e.bands else 0
+        self.a_next_band.setText(f"次の段を解析（残り{left}段）" if left else "次の段を解析")
+
+    def action_next_band(self):
+        e = self.engine
+        if not e.untraced_bands():
+            return
+        self._set_state("解析", "次の段を解析中…")
+
+        def job(cb):
+            return e.trace_next(cb)
+
+        def done(i):
+            if i is None:
+                return
+            self.dirty = True
+            self.sel_band = i
+            self._set_state("解析", f"{e.bands[i].name}を解析しました（残り{len(e.untraced_bands())}段）")
+            self._build_band_items(i)
+            self.apply_visibility()
+            self.band_list.setCurrentRow(i)
+            self.refresh_panels()
+            self._update_step_actions()
+
+        self.run_task("次の段を解析しています…", job, done,
+                      lambda m: (self._set_state("解析", "失敗"), self._show_error(m)))
+
+    def action_retrace_following(self):
+        e = self.engine
+        i = self.sel_band
+        if not e.bands or i >= len(e.bands) - 1:
+            return
+        if not self._confirm(f"{e.bands[i].name}より下の段を、{e.bands[i].name}の線を避けて引き直します（それらの段の修正は初期化。戻す(Ctrl+Z)で戻せます）。よろしいですか？"):
+            return
+        self._set_state("解析", "後の段を引き直し中…")
+
+        def job(cb):
+            return e.retrace_following(i, cb)
+
+        def done(js):
+            self.dirty = True
+            self._set_state("解析", f"{len(js)}段を引き直しました")
+            self._build_all_items()
+            self.refresh_panels()
+            self._update_step_actions()
+
+        self.run_task("後の段を引き直しています…", job, done,
+                      lambda m: (self._set_state("解析", "失敗"), self._show_error(m)))
 
     def _profile_chosen(self, index):
         self.set_profile(self.profile_combo.itemData(index))
@@ -1227,6 +1291,7 @@ class MainWindow(QMainWindow):
         self.update_verify_tables()
         self._update_verify_target_combo()
         self.update_exclusion_table()
+        self._update_step_actions()
         b = self.current_band()
         self.cb_confirm.blockSignals(True)
         self.cb_confirm.setChecked(bool(b and b.confirmed))

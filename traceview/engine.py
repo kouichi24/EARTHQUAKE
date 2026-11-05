@@ -79,6 +79,8 @@ class Engine:
         self.section_settings = SectionSettings()
         self.readouts = []          # points read from the trace: dicts {band, x, y} (work px)
         self.exclusions = []        # rectangles whose ink is ignored (text, stains): dicts {x0, y0, x1, y1} (work px)
+        self._tracing_band = -1     # index of the band being traced (its own lines are not 'occupied')
+        self._origins_hint = None   # origins of all bands while they are being traced one after the other
 
     # ------------------------------------------------------------------ open
     def open(self, path, page=0, progress=_noop):
@@ -198,17 +200,101 @@ class Engine:
             origins.append((int(xmin), int(np.median(ys[sel]) + max(0, p - 8))))
         return origins
 
-    def analyze(self, origins=None, progress=_noop):
+    def analyze(self, origins=None, progress=_noop, stepwise=False):
+        """Trace the bands one after the other, top band first. Lines already taken by an earlier band are
+        avoided by the later ones. With stepwise=True only the first band is traced; trace_next() does the rest
+        so that each band can be checked (and corrected) before the next one is judged."""
         self.ensure_graph(progress)
         progress("三段の起点を検出中", 0.7)
         if origins is None:
             origins = self.detect_origins()
+        self._origins_hint = list(origins)
         self.bands = []
         for i, (ox, oy) in enumerate(origins):
-            progress(f"{BAND_NAMES[i] if i < 3 else i + 1}を追跡中", 0.72 + 0.25 * i / max(1, len(origins)))
+            name = BAND_NAMES[i] if i < 3 else f"波形{i + 1}"
+            if stepwise and i > 0:
+                self.bands.append(self._placeholder_band(i, ox, oy))
+                continue
+            progress(f"{name}を追跡中（{i + 1}/{len(origins)}段目）", 0.72 + 0.25 * i / max(1, len(origins)))
             self.bands.append(self._trace_new_band(i, origins))
         progress("完了", 1.0)
         return self.bands
+
+    def _placeholder_band(self, i, ox, oy):
+        b = Band(i, BAND_NAMES[i] if i < 3 else f"波形{i + 1}", BAND_COLORS[i % len(BAND_COLORS)], (ox, oy), float(oy))
+        b.traced = False
+        b.line_zero = b.line_top = b.line_bottom = float(oy)
+        b.issues.append(Issue("not_traced", ox, oy, "まだ解析していません（「次の段を解析」で解析します）"))
+        b.initial = b.snapshot()
+        return b
+
+    def untraced_bands(self):
+        return [i for i, b in enumerate(self.bands) if not b.traced]
+
+    def trace_next(self, progress=_noop):
+        """Trace the next band that has not been traced yet, avoiding the lines the earlier bands use."""
+        idx = self.untraced_bands()
+        if not idx:
+            return None
+        i = idx[0]
+        self.ensure_graph(progress)
+        progress(f"{self.bands[i].name}を追跡中", 0.5)
+        origins = self._origin_list()
+        nb = self._trace_new_band(i, origins)
+        nb.sections, nb.revisions, nb.findings = self.bands[i].sections, self.bands[i].revisions, self.bands[i].findings
+        nb.traced = True
+        self.bands[i] = nb
+        return i
+
+    def retrace_following(self, i, progress=_noop):
+        """After band i was corrected, trace the bands below it again (each one avoiding the lines taken before)."""
+        self.ensure_graph(progress)
+        origins = self._origin_list()
+        done = []
+        for j in range(i + 1, len(self.bands)):
+            progress(f"{self.bands[j].name}を引き直し中", 0.3 + 0.6 * (j - i) / max(1, len(self.bands) - i))
+            nb = self._trace_new_band(j, origins)
+            self._replace_band(j, nb)
+            self.bands[j].traced = True
+            done.append(j)
+        return done
+
+    def _origin_list(self):
+        """Origins of all bands (also those not traced yet)."""
+        base = list(self._origins_hint) if self._origins_hint else []
+        out = []
+        for i in range(max(len(base), len(self.bands))):
+            if i < len(self.bands):
+                out.append(self.bands[i].origin)
+            else:
+                out.append(base[i])
+        return out
+
+    def _confirmed_edges(self, exclude):
+        """Edges of bands the user has confirmed: other bands must not use them (a hard rule, unlike 'occupied')."""
+        g = self.graph
+        out = set()
+        if g is None:
+            return out
+        for j, b in enumerate(self.bands):
+            if j == exclude or not b.confirmed or len(b.path) == 0:
+                continue
+            e = np.unique(g.pix_edge[b.path[:, 1], b.path[:, 0]])
+            out |= {int(x) for x in e if x >= 0}
+        return out
+
+    def _occupied_edges(self, exclude):
+        """Graph edges that the lines of the other bands run along (avoided, not forbidden)."""
+        g = self.graph
+        occ = set()
+        if g is None:
+            return occ
+        for j, b in enumerate(self.bands):
+            if j == exclude or len(b.path) == 0:
+                continue
+            e = np.unique(g.pix_edge[b.path[:, 1], b.path[:, 0]])
+            occ |= {int(x) for x in e if x >= 0}
+        return occ
 
     # ----------------------------------------------------------------- helpers
     def _zone(self, i, origins):
@@ -236,15 +322,17 @@ class Engine:
                     best, bd = j, d
         return best
 
-    def _trace_from(self, node, edge, corr, zone, blocked=None, oy=0, prefix=None):
+    def _trace_from(self, node, edge, corr, zone, blocked=None, oy=0, prefix=None, use_confirmed=True):
         """Walk, cut at the right-most point of the band zone, and bridge to further fragments."""
         g = self.graph
         W = self.work.shape[1]
         x_right = self.prepared.paper[2]
-        walker = Walker(g, self.params, corr, ref_zone=self.prepared.ref_zone)
+        walker = Walker(g, self.params, corr, ref_zone=self.prepared.ref_zone,
+                        occupied=self._occupied_edges(exclude=self._tracing_band))
         pieces, rev, amb, inf = [], [], [], []
+        confirmed_edges = self._confirmed_edges(self._tracing_band) if use_confirmed else set()
         used_nodes = set()
-        blocked = set(blocked or ())
+        blocked = set(blocked or ()) | confirmed_edges
         offset = 0
         cur_node, cur_edge = node, edge
         end_x = 0.0
@@ -316,7 +404,7 @@ class Engine:
             b.issues.append(Issue("inferred", float(path[a][0]), float(path[a][1]),
                                   f"画像の薄い線の痕跡をたどって推定でつないだ区間（長さ約{(c - a + 1) / self.scale:.0f}px）"))
         # Stretches that leave the band's own territory (arcs, dirt, other bands) need a human look.
-        origins = [bd.origin for bd in self.bands] if self.bands else [b.origin]
+        origins = self._origin_list() or [b.origin]
         if b.index < len(origins) and len(origins) >= 2 and len(path):
             _corr, _zone = self._zone(b.index, origins)
             out = (path[:, 1] < _corr[2]) | (path[:, 1] > _corr[3])
@@ -338,7 +426,7 @@ class Engine:
 
     def _mark_suspect(self, b):
         """Vertices on stretches that leave the band's territory are candidates only (MS-04)."""
-        origins = [bd.origin for bd in self.bands] if self.bands else [b.origin]
+        origins = self._origin_list() or [b.origin]
         if b.index >= len(origins) or len(origins) < 2 or not b.vertices:
             return
         corr, _zone = self._zone(b.index, origins)
@@ -370,6 +458,7 @@ class Engine:
             b.line_bottom_manual = False
 
     def _trace_new_band(self, i, origins):
+        self._tracing_band = i
         ox, oy = origins[i]
         b = Band(i, BAND_NAMES[i] if i < 3 else f"波形{i + 1}", BAND_COLORS[i % len(BAND_COLORS)], (ox, oy), float(oy))
         corr, zone = self._zone(i, origins)
@@ -379,8 +468,23 @@ class Engine:
             b.line_zero = b.line_top = b.line_bottom = float(oy)
             b.initial = b.snapshot()
             return b
-        path, rev, amb, inf, end_x = self._trace_from(node, self.graph.nodes[node].edges[0], corr, zone, oy=oy)
+        first = self.graph.nodes[node].edges[0]
+        path, rev, amb, inf, end_x = self._trace_from(node, first, corr, zone, oy=oy)
+        shared = False
+        if self._confirmed_edges(i):
+            W = self.work.shape[1]
+            if end_x < self.prepared.paper[2] - 0.03 * W:
+                # The confirmed bands' lines are off limits, but this band cannot get to the end without them
+                # (the pens really overlap there): allow the shared line and say so.
+                p2 = self._trace_from(node, first, corr, zone, oy=oy, use_confirmed=False)
+                if p2[4] > end_x + 50:
+                    path, rev, amb, inf, end_x = p2
+                    shared = True
         self._finish_band(b, path, rev, amb, inf, end_x)
+        if shared:
+            x, y = b.path[-1] if len(b.path) else b.origin
+            b.issues.append(Issue("shared_line", float(x), float(y),
+                                  "確認済みの段と線が重なっています（そこを通らないと末端まで追えないため共有しました）"))
         b.initial = b.snapshot()
         return b
 
@@ -588,6 +692,7 @@ class Engine:
             blocked |= {int(e) for e in e_ids if e >= 0}
         if edge in blocked:
             blocked.discard(edge)
+        self._tracing_band = b.index
         tail, rev, amb, inf, end_x = self._trace_from(node, edge, corr, zone, blocked=blocked, oy=oy)
         head = np.concatenate([prefix, route[1:], partial]) if len(partial) else np.concatenate([prefix, route[1:]])
         newpath = np.concatenate([head, tail]).astype(np.int32) if len(tail) else head
@@ -754,6 +859,8 @@ class Engine:
         return b.complete and not blocking and not b.pending and b.confirmed
 
     def value_status(self, b):
+        if not b.traced:
+            return "未解析"
         if b.pending:
             return "未適用の修正あり"
         if self.is_determinate(b):
