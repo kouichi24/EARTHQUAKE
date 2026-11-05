@@ -79,6 +79,7 @@ class Engine:
         self.section_settings = SectionSettings()
         self.readouts = []          # points read from the trace: dicts {band, x, y} (work px)
         self.exclusions = []        # rectangles whose ink is ignored (text, stains): dicts {x0, y0, x1, y1} (work px)
+        self.band_ranges = {}       # band index -> (y_top, y_bottom) in work px chosen by the user (the band's territory)
         self._tracing_band = -1     # index of the band being traced (its own lines are not 'occupied')
         self._origins_hint = None   # origins of all bands while they are being traced one after the other
 
@@ -209,6 +210,7 @@ class Engine:
         if origins is None:
             origins = self.detect_origins()
         self._origins_hint = list(origins)
+        self.band_ranges = {}
         self.bands = []
         for i, (ox, oy) in enumerate(origins):
             name = BAND_NAMES[i] if i < 3 else f"波形{i + 1}"
@@ -270,6 +272,77 @@ class Engine:
                 out.append(base[i])
         return out
 
+    # ------------------------------------------- vertical range of a band (user's check)
+    def check_range(self, bi, top, bot):
+        """Does the line really go as far as the chosen top / bottom? What would the range cut off?
+
+        Looks at the current trace and at the image (tips of lines near the two borders that belong to the trace).
+        """
+        top, bot = float(min(top, bot)), float(max(top, bot))
+        b = self.bands[bi]
+        res = dict(top=top, bottom=bot, traced=b.traced and len(b.path) > 0, origin_inside=top <= b.origin[1] <= bot,
+                   trace_top=None, trace_bottom=None, reaches_top=False, reaches_bottom=False,
+                   outside_px=0.0, tips_top=0, tips_bottom=0, tips_total=0)
+        if not res["traced"]:
+            return res
+        p = b.path
+        res["trace_top"], res["trace_bottom"] = float(p[:, 1].min()), float(p[:, 1].max())
+        margin = 12.0
+        res["reaches_top"] = res["trace_top"] <= top + margin
+        res["reaches_bottom"] = res["trace_bottom"] >= bot - margin
+        out = (p[:, 1] < top) | (p[:, 1] > bot)
+        res["outside_px"] = float(out.sum()) / self.scale
+        if self.graph is not None:
+            g = self.graph
+            tree = cKDTree(p.astype(float))
+            for n in g.nodes:
+                if n.kind != "end" or not n.edges or not (top - 25 <= n.y <= bot + 25):
+                    continue
+                e = g.edges[n.edges[0]]
+                if e.inferred or e.length < 12:
+                    continue
+                base = e.pix[-1] if (e.pix[0] == np.round([n.x, n.y])).all() else e.pix[0]
+                if tree.query(base.astype(float))[0] > 3.5:
+                    continue                      # not part of this band's line
+                res["tips_total"] += 1
+                if abs(n.y - top) <= 25:
+                    res["tips_top"] += 1
+                if abs(n.y - bot) <= 25:
+                    res["tips_bottom"] += 1
+        return res
+
+    def retrace_in_range(self, bi, top, bot, progress=_noop):
+        """Trace the band again inside the vertical range [top, bottom] only (undoable)."""
+        top, bot = float(min(top, bot)), float(max(top, bot))
+        b = self.bands[bi]
+        if bot - top < 20:
+            raise EngineError("範囲が狭すぎます")
+        if not (top <= b.origin[1] <= bot):
+            raise EngineError("範囲に、この段の起点（左端の線）が入っていません。範囲を広げてください")
+        self.ensure_graph(progress)
+        old = self.band_ranges.get(bi)
+        self.band_ranges[bi] = (top, bot)
+        try:
+            nb = self._trace_new_band(bi, self._origin_list())
+        except Exception:
+            if old is None:
+                self.band_ranges.pop(bi, None)
+            else:
+                self.band_ranges[bi] = old
+            raise
+        nb.traced = True
+        return self._replace_band(bi, nb)
+
+    def clear_range(self, bi, progress=_noop):
+        """Go back to the automatic range of the band and trace it again."""
+        if bi not in self.band_ranges:
+            return self.bands[bi]
+        self.ensure_graph(progress)
+        del self.band_ranges[bi]
+        nb = self._trace_new_band(bi, self._origin_list())
+        nb.traced = True
+        return self._replace_band(bi, nb)
+
     def _confirmed_edges(self, exclude):
         """Edges of bands the user has confirmed: other bands must not use them (a hard rule, unlike 'occupied')."""
         g = self.graph
@@ -298,6 +371,10 @@ class Engine:
 
     # ----------------------------------------------------------------- helpers
     def _zone(self, i, origins):
+        rng = self.band_ranges.get(i)
+        if rng:                    # the user fixed the vertical range of this band
+            top, bot = rng
+            return (top, bot, top - 10, bot + 10), (top, bot)
         oy = origins[i][1]
         H = self.work.shape[0]
         up = oy - origins[i - 1][1] if i > 0 else (origins[i + 1][1] - oy if i + 1 < len(origins) else 0.2 * H)

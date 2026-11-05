@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QGraphicsEllipseItem, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGroupBox,
                                QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
                                QMainWindow, QMessageBox, QProgressDialog, QPushButton, QSlider,
-                               QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar,
+                               QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar,
                                QVBoxLayout, QWidget)
 
 from .. import __version__
@@ -295,6 +295,85 @@ class MainWindow(QMainWindow):
         self.meas_note.setWordWrap(True)
         ml.addWidget(self.meas_note)
         self.tabs.addTab(mw, "測定")
+        # confirm tab (one band at a time, checked by the user)
+        cw2 = QWidget()
+        cl2 = QVBoxLayout(cw2)
+        self.conf_title = QLabel("")
+        self.conf_title.setStyleSheet("font-weight:bold;font-size:14px")
+        cl2.addWidget(self.conf_title)
+        cl2.addWidget(QLabel("1段ずつ、①→⑤の順に進めます。"))
+        g1 = QGroupBox("① 線が通る上下の範囲を選ぶ")
+        l1 = QVBoxLayout(g1)
+        self.conf_range_label = QLabel("")
+        l1.addWidget(self.conf_range_label)
+        r1 = QHBoxLayout()
+        bp = QPushButton("画面で上から下へドラッグして選ぶ")
+        bp.clicked.connect(lambda: self.set_tool("brange"))
+        bc = QPushButton("自動の範囲に戻す")
+        bc.clicked.connect(self.action_clear_range)
+        r1.addWidget(bp)
+        r1.addWidget(bc)
+        l1.addLayout(r1)
+        f1 = QFormLayout()
+        self.rng_top = QDoubleSpinBox()
+        self.rng_bot = QDoubleSpinBox()
+        for sp in (self.rng_top, self.rng_bot):
+            sp.setRange(0, 200000)
+            sp.setDecimals(0)
+        f1.addRow("上端 Y [px]", self.rng_top)
+        f1.addRow("下端 Y [px]", self.rng_bot)
+        bn = QPushButton("数値を反映")
+        bn.clicked.connect(lambda: self.set_pending_range(self.rng_top.value() * self.engine.scale,
+                                                          self.rng_bot.value() * self.engine.scale))
+        f1.addRow(bn)
+        l1.addLayout(f1)
+        cl2.addWidget(g1)
+        g2 = QGroupBox("② その範囲まで線が届いているか確認する")
+        l2 = QVBoxLayout(g2)
+        b2 = QPushButton("範囲の線を確認")
+        b2.clicked.connect(self.action_check_range)
+        l2.addWidget(b2)
+        self.conf_check_label = QLabel("（範囲を選ぶと、自動で確認します）")
+        self.conf_check_label.setTextFormat(Qt.RichText)
+        l2.addWidget(self.conf_check_label)
+        cl2.addWidget(g2)
+        g3 = QGroupBox("③ この範囲の中で、線を引き直す")
+        l3 = QVBoxLayout(g3)
+        b3 = QPushButton("この範囲で引き直す")
+        b3.clicked.connect(self.action_retrace_range)
+        l3.addWidget(b3)
+        l3.addWidget(QLabel("範囲の外が中心の線は使われません（範囲から少し突き出る線は使われます）。戻す(Ctrl+Z)で元に戻せます。"))
+        cl2.addWidget(g3)
+        g4 = QGroupBox("④ 結果を見て、必要なら直す")
+        l4 = QVBoxLayout(g4)
+        l4.addWidget(QLabel(
+            "・線の位置がずれている頂点 → 頂点を画像上でドラッグ（画像の線の上を動きます。離すと、そこから先を自動で引き直します）\n"
+            "・取りこぼした先端 → 「頂点を追加」(A)で先端をクリック\n"
+            "・文字・汚れを線と間違えている → 「除外範囲を囲む」(E)で囲む\n"
+            "・全体を点検したい → 「検証して引き直す」(F7)"))
+        r4 = QHBoxLayout()
+        for text, fn in (("頂点を追加", lambda: self.set_tool("add")), ("除外範囲を囲む", lambda: self.set_tool("excl")),
+                         ("検証して引き直す", lambda: self.action_verify(True))):
+            bb_ = QPushButton(text)
+            bb_.clicked.connect(fn)
+            r4.addWidget(bb_)
+        l4.addLayout(r4)
+        cl2.addWidget(g4)
+        g5 = QGroupBox("⑤ この段を確認済みにして、次へ")
+        l5 = QVBoxLayout(g5)
+        b5 = QPushButton("確認済みにして次の段へ")
+        b5.clicked.connect(self.action_confirm_and_next)
+        l5.addWidget(b5)
+        self.conf_next_label = QLabel("")
+        l5.addWidget(self.conf_next_label)
+        cl2.addWidget(g5)
+        cl2.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(cw2)
+        self.conf_scroll = scroll
+        self.tabs.insertTab(0, scroll, "段の確認")
+        self.pending_range = {}
         # vertices tab
         vw = QWidget()
         vl = QVBoxLayout(vw)
@@ -689,6 +768,8 @@ class MainWindow(QMainWindow):
         def done(_b):
             self.dirty = True
             self._set_state("解析", f"完了（{len(e.bands)}段を検出）")
+            if self.cb_step.isChecked():
+                self.tabs.setCurrentIndex(0)             # "段の確認": the steps for checking one band at a time
             self.sel_band, self.sel_vertex = 0, None
             self.rebuild_scene(keep_view=True)
             self._update_enabled()
@@ -720,6 +801,179 @@ class MainWindow(QMainWindow):
         self.rebuild_scene()
         self._update_enabled()
         self.action_analyze(force=True)
+
+    # ------------------------------------------------------ one band checked by the user
+    def _band_range(self, bi):
+        """The range to show: the one just picked, else the one in use, else None."""
+        return self.pending_range.get(bi) or self.engine.band_ranges.get(bi)
+
+    def set_pending_range(self, y0, y1):
+        if not self.engine.bands:
+            return
+        top, bot = min(y0, y1), max(y0, y1)
+        if bot - top < 20:
+            self._info("範囲が狭すぎます")
+            return
+        self.pending_range[self.sel_band] = (top, bot)
+        self.set_tool("select")
+        self._draw_range_items()
+        self.update_confirm_tab()
+        self.action_check_range()
+
+    def action_check_range(self):
+        e = self.engine
+        rng = self._band_range(self.sel_band)
+        if rng is None or not e.bands:
+            self.conf_check_label.setText("先に ① で範囲を選んでください。")
+            return
+        r = e.check_range(self.sel_band, *rng)
+        inv = 1 / e.scale
+        ok, ng = "<span style='color:#2e7d32'>◯</span>", "<span style='color:#c62828'>×</span>"
+        if not r["traced"]:
+            self.conf_check_label.setText(f"{ng} この段は、まだ解析していません。")
+            return
+        lines = [f"{ok if r['origin_inside'] else ng} 起点（左端の線）は、範囲の{'中' if r['origin_inside'] else '外'}です"]
+        for name, reach, ty, tips, edge in (("上端", r["reaches_top"], r["trace_top"], r["tips_top"], r["top"]),
+                                            ("下端", r["reaches_bottom"], r["trace_bottom"], r["tips_bottom"], r["bottom"])):
+            txt = (f"{ok if reach else ng} {name}: 範囲の{name} Y={edge * inv:.0f}px に対し、現在の線は Y={ty * inv:.0f}px まで"
+                   f"{'届いています' if reach else '届いていません'}")
+            if tips:
+                txt += f"（{name}の近くに線の先端が{tips}本あります）"
+            elif not reach:
+                txt += "（{}の近くに、この段の線の先端は見つかりません。範囲が広すぎるかもしれません）".format(name)
+            lines.append(txt)
+        if r["outside_px"] > 0:
+            lines.append(f"△ 範囲の外にある線の長さ: 約{r['outside_px']:.0f}px（引き直すと、範囲の外が中心の線は使われません）")
+        good = r["origin_inside"] and (r["reaches_top"] or r["tips_top"]) and (r["reaches_bottom"] or r["tips_bottom"])
+        lines.append("<b>" + ("→ この範囲で引き直せます（③へ）" if good else "→ 範囲を調整してから、引き直してください") + "</b>")
+        self.conf_check_label.setText("<br>".join(lines))
+        self.check_result = r
+
+    def action_retrace_range(self):
+        e = self.engine
+        rng = self._band_range(self.sel_band)
+        if rng is None or not e.bands:
+            self._info("先に ① で範囲を選んでください")
+            return
+        bi = self.sel_band
+        self._set_state("再追跡", "範囲内で引き直し中…")
+
+        def job(cb):
+            return e.retrace_in_range(bi, rng[0], rng[1], cb)
+
+        def done(_nb):
+            self.pending_range.pop(bi, None)
+            self.dirty = True
+            self._set_state("再追跡", f"{e.bands[bi].name}を範囲内で引き直しました")
+            self._build_band_items(bi)
+            self.apply_visibility()
+            self.refresh_panels()
+            self._draw_range_items()
+
+        self.run_task("範囲内で引き直しています…", job, done,
+                      lambda m: (self._set_state("再追跡", "失敗"), self._show_error(m)))
+
+    def action_clear_range(self):
+        e = self.engine
+        bi = self.sel_band
+        if not e.bands:
+            return
+        self.pending_range.pop(bi, None)
+        if bi not in e.band_ranges:
+            self._draw_range_items()
+            self.update_confirm_tab()
+            return
+
+        def job(cb):
+            return e.clear_range(bi, cb)
+
+        def done(_nb):
+            self.dirty = True
+            self._build_band_items(bi)
+            self.apply_visibility()
+            self.refresh_panels()
+            self._draw_range_items()
+
+        self.run_task("自動の範囲で引き直しています…", job, done)
+
+    def action_confirm_and_next(self):
+        e = self.engine
+        b = self.current_band()
+        if b is None:
+            return
+        if e.is_pending(self.sel_band) if hasattr(e, "is_pending") else bool(b.pending):
+            self._show_error("未適用の修正があります。再追跡を適用するか、取り消してから進めてください")
+            return
+        b.confirmed = True
+        self.dirty = True
+        self.cb_confirm.blockSignals(True)
+        self.cb_confirm.setChecked(True)
+        self.cb_confirm.blockSignals(False)
+        if e.untraced_bands():
+            self.action_next_band()
+        elif self.sel_band + 1 < len(e.bands):
+            self.band_list.setCurrentRow(self.sel_band + 1)
+            self._info(f"{b.name}を確認済みにしました。次は{e.bands[self.sel_band].name}を確認してください")
+        else:
+            self._info("すべての段を確認済みにしました")
+        self.refresh_panels()
+
+    def update_confirm_tab(self):
+        e = self.engine
+        b = self.current_band()
+        if b is None:
+            self.conf_title.setText("画像を開いて、自動解析してください")
+            return
+        n = len(e.bands)
+        self.conf_title.setText(f"いま確認する段: {b.name}（{self.sel_band + 1}/{n}段目）　状態: {e.value_status(b)}")
+        rng = self._band_range(self.sel_band)
+        inv = 1 / e.scale
+        if rng is None:
+            self.conf_range_label.setText("範囲: 自動（隣の段との中間まで）")
+        else:
+            using = self.sel_band in e.band_ranges and e.band_ranges[self.sel_band] == rng
+            self.conf_range_label.setText(f"範囲: Y {rng[0] * inv:.0f} ～ {rng[1] * inv:.0f} px"
+                                          + ("（この範囲で解析済み）" if using else "（選んだだけ。③で引き直すと反映）"))
+            self.rng_top.setValue(rng[0] * inv)
+            self.rng_bot.setValue(rng[1] * inv)
+        left = len(e.untraced_bands())
+        self.conf_next_label.setText(f"未解析の段が{left}段あります。「確認済みにして次の段へ」で、次の段を解析します。" if left
+                                     else ("次の段へ進みます。" if self.sel_band + 1 < n else "これが最後の段です。"))
+
+    def _draw_range_items(self):
+        for it in getattr(self, "range_items", []):
+            if it.scene() is self.scene:
+                self.scene.removeItem(it)
+        self.range_items = []
+        e = self.engine
+        if e.work is None:
+            return
+        W = e.work.shape[1]
+        ranges = {bi: (r, True) for bi, r in e.band_ranges.items()}
+        for bi, r in self.pending_range.items():
+            ranges[bi] = (r, False)
+        for bi, (rng, applied) in ranges.items():
+            if bi >= len(e.bands):
+                continue
+            col = QColor(e.bands[bi].color)
+            rc = QGraphicsRectItem(0, rng[0], W, rng[1] - rng[0])
+            c2 = QColor(col)
+            c2.setAlpha(28 if applied else 50)
+            rc.setBrush(QBrush(c2))
+            pen = QPen(col, 2, Qt.SolidLine if applied else Qt.DashLine)
+            pen.setCosmetic(True)
+            rc.setPen(pen)
+            rc.setZValue(3)
+            rc.setToolTip(f"{e.bands[bi].name}の線が通る範囲" + ("" if applied else "（選んだだけ。引き直すと反映）"))
+            self.scene.addItem(rc)
+            lbl = QGraphicsSimpleTextItem(f"{e.bands[bi].name}の範囲")
+            lbl.setBrush(QBrush(col))
+            lbl.setFlag(QGraphicsSimpleTextItem.ItemIgnoresTransformations, True)
+            lbl.setPos(6, rng[0] + 4)
+            lbl.setZValue(3)
+            self.scene.addItem(lbl)
+            self.range_items += [rc, lbl]
+        self.apply_visibility()
 
     # ------------------------------------------------ one band after the other
     def _update_step_actions(self):
@@ -1055,6 +1309,7 @@ class MainWindow(QMainWindow):
         self.replay_marker = None
         self.rev_items = []
         self.excl_items = []
+        self.range_items = []
         self.ver_range_item = None
         self.pix_item = None
         if e.work is None:
@@ -1214,7 +1469,7 @@ class MainWindow(QMainWindow):
         hide = self.a_hide_all.isChecked()
         self.a_hide_all.setText("図形を表示に戻す" if hide else "図形を全部消す")
         for extra in (self.sel_ring, self.replay_marker, self.section_preview, *self.rev_items, *self.excl_items,
-                      self.ver_range_item):
+                      self.ver_range_item, *getattr(self, "range_items", [])):
             if extra is not None and extra.scene() is self.scene:
                 extra.setVisible(not hide)
         if self.pix_item is not None:
@@ -1250,12 +1505,12 @@ class MainWindow(QMainWindow):
         self.tool = tool
         for name, act in (("select", self.t_select), ("add", self.t_add), ("origin", self.t_origin),
                           ("section", self.t_section), ("read", self.t_read), ("excl", self.t_excl),
-                          ("vrange", None)):
+                          ("vrange", None), ("brange", None)):
             if act is None:
                 continue
             act.setChecked(name == tool)
         self.view.click_tool = tool in ("add", "origin", "calib", "read")
-        self.view.drag_tool = tool in ("section", "excl", "vrange")
+        self.view.drag_tool = tool in ("section", "excl", "vrange", "brange")
         for d in self.band_items.values():
             for it in d["vertices"]:
                 it.set_editable(tool == "select")
@@ -1264,7 +1519,8 @@ class MainWindow(QMainWindow):
                 "section": "測定したい範囲を横にドラッグ（選択中の段に追加）",
                 "read": "値を読みたい点をトレース上でクリック（選択中の段）",
                 "excl": "線として取りたくない所（文字など）を、四角でドラッグして囲む",
-                "vrange": "検証・引き直しをする範囲を、横にドラッグして指定"}[tool]
+                "vrange": "検証・引き直しをする範囲を、横にドラッグして指定",
+                "brange": "この段の線が通る範囲を、上から下へドラッグして指定（横の位置は関係ありません）"}[tool]
         self.statusBar().showMessage(hint, 6000)
 
     # ------------------------------------------------------------ panels
@@ -1292,6 +1548,8 @@ class MainWindow(QMainWindow):
         self._update_verify_target_combo()
         self.update_exclusion_table()
         self._update_step_actions()
+        self.update_confirm_tab()
+        self._draw_range_items()
         b = self.current_band()
         self.cb_confirm.blockSignals(True)
         self.cb_confirm.setChecked(bool(b and b.confirmed))
@@ -1900,7 +2158,10 @@ class MainWindow(QMainWindow):
         bd = self.current_band()
         if bd is None:
             return
-        if self.tool == "excl":
+        if self.tool == "brange":
+            y0, y1 = a.y(), b.y()
+            color, pen_col = QColor(76, 175, 80, 60), "#4caf50"
+        elif self.tool == "excl":
             y0, y1 = a.y(), b.y()
             color, pen_col = QColor(244, 67, 54, 70), "#f44336"
         else:
@@ -1914,13 +2175,18 @@ class MainWindow(QMainWindow):
             self.section_preview = it
         self.section_preview.setBrush(QBrush(color))
         self.section_preview.setPen(QPen(QColor(pen_col), 1, Qt.DashLine))
-        self.section_preview.setRect(min(a.x(), b.x()), min(y0, y1), abs(b.x() - a.x()), abs(y1 - y0))
+        if self.tool == "brange":
+            self.section_preview.setRect(0, min(y0, y1), self.engine.work.shape[1], abs(y1 - y0))
+        else:
+            self.section_preview.setRect(min(a.x(), b.x()), min(y0, y1), abs(b.x() - a.x()), abs(y1 - y0))
 
     def _section_drag_done(self, a, b):
         if self.section_preview is not None:
             self.scene.removeItem(self.section_preview)
             self.section_preview = None
-        if self.tool == "excl":
+        if self.tool == "brange":
+            self.set_pending_range(a.y(), b.y())
+        elif self.tool == "excl":
             self.add_exclusion_rect(a.x(), a.y(), b.x(), b.y())
         elif self.tool == "vrange":
             self.set_verify_range(a.x(), b.x())

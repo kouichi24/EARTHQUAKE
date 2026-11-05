@@ -54,6 +54,7 @@ def save_project(engine, path):
                     page=engine.page, orig_size=list(engine.orig_size)),
         transform=dict(scale=engine.scale, rotation_deg=0.0, note="work = original * scale"),
         profile=engine.profile_key, section_settings=engine.section_settings.to_dict(), readouts=engine.readouts, exclusions=engine.exclusions,
+        band_ranges={str(k): list(v) for k, v in engine.band_ranges.items()},
         params=engine.params.to_dict(), calibration=engine.calibration.to_dict(),
         bands=[],
     )
@@ -93,6 +94,7 @@ def load_project(engine, path, source_path=None, progress=lambda *a: None):
     engine.section_settings = SectionSettings.from_dict(doc.get("section_settings"))
     engine.readouts = list(doc.get("readouts", []))
     engine.exclusions = list(doc.get("exclusions", []))
+    engine.band_ranges = {int(k): tuple(v) for k, v in doc.get("band_ranges", {}).items()}
     engine.calibration = Calibration.from_dict(doc.get("calibration"))
     engine.bands = []
     for d in doc["bands"]:
