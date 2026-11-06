@@ -124,3 +124,17 @@ def test_erase_part_of_the_line_preview_confirm_cancel(win):
     assert win.band_items[0]["path"] is not None                     # the gap is drawn, the rest stays
     win.set_pending_erase(5, 5, 20, 20)                              # nothing there: told, not erased
     assert win.erase_pending is None and "ありません" in win.last_info
+
+
+def test_selection_survives_a_refused_move_and_a_cancel(win):
+    b = win.engine.bands[0]
+    win.sel_set = []
+    for k in (5, 9, 14):
+        win.on_vertex_selected(0, k, from_canvas=True, additive=True)
+    assert len(win.sel_set) == 3
+    v = b.vertices[9]
+    win.on_vertex_dragged(0, 9, v.x + 500, v.y + 500)              # refused: nothing changes
+    assert len(win.sel_set) == 3 and len(win.sel_rings) == 3       # the selection is still there
+    win.on_vertex_dragged(0, 9, v.x + 3, v.y)
+    win.action_cancel_pending()                                      # cancel the pending edit: still selected
+    assert len(win.sel_set) == 3

@@ -842,7 +842,8 @@ class Engine:
             same_tail = int(diff[0]) if len(diff) else n
         changed_old = max(0, len(old) - same_head - same_tail)
         changed_new = max(0, len(new) - same_head - same_tail)
-        return dict(old=old, new=new, messages=msgs, changed_old=changed_old / self.scale, changed_new=changed_new / self.scale,
+        return dict(old=old, new=new, messages=msgs,
+                    range_old=(same_head, max(same_head, len(old) - same_tail)), range_new=(same_head, max(same_head, len(new) - same_tail)), changed_old=changed_old / self.scale, changed_new=changed_new / self.scale,
                     vertices_before=len(b.vertices), vertices_after=len(work_b.vertices),
                     first_changed=(float(new[same_head][0]), float(new[same_head][1])) if same_head < len(new) else None)
 

@@ -101,6 +101,7 @@ class MainWindow(QMainWindow):
         self.section_preview = None
         self.rev_items = []
         self.excl_items = []
+        self.sel_coords = {}
         self.sel_set = []            # selected vertices as (band, vertex) pairs; managed here, not by Qt
         self.sel_rings = []
         self.edit_preview_items = []
@@ -1441,7 +1442,21 @@ class MainWindow(QMainWindow):
         self._clear_band_items(bi)
         d = dict(path=None, inferred=[], vertices=[], lines={}, issues=[], pending=[])
         pts = b.path
-        self.sel_set = [t for t in self.sel_set if t[0] != bi]              # vertex numbers change when a band is redrawn
+        # vertex numbers can change when a band is redrawn: keep the selection of vertices that are still where they were
+        remapped = []
+        for (sb, sv) in self.sel_set:
+            if sb != bi:
+                remapped.append((sb, sv))
+                continue
+            xy = getattr(self, "sel_coords", {}).get((sb, sv))
+            if xy is None:
+                continue
+            for j, v in enumerate(b.vertices):
+                if abs(v.x - xy[0]) <= 1.5 and abs(v.y - xy[1]) <= 1.5:
+                    remapped.append((bi, j))
+                    break
+        self.sel_set = remapped
+        self.sel_vertex = self.sel_set[-1][1] if self.sel_set else None
         if len(pts) > 1:
             qpath = QPainterPath()
             bounds = [0] + [c + 1 for c in sorted(set(b.cuts))] + [len(pts)]   # a stretch erased by the user stays a gap
@@ -1557,6 +1572,8 @@ class MainWindow(QMainWindow):
                 self.scene.addItem(ln)
                 d["pending"].append(ln)
         self.band_items[bi] = d
+        if any(t[0] == bi for t in self.sel_set):
+            self._draw_selection()
 
     def apply_visibility(self, *_):
         hide = self.a_hide_all.isChecked()
@@ -1783,10 +1800,12 @@ class MainWindow(QMainWindow):
         self.sel_rings = []
         self.sel_ring = None
         e = self.engine
+        self.sel_coords = {}
         for k, (bi, vi) in enumerate(self.sel_set):
             if bi >= len(e.bands) or vi >= len(e.bands[bi].vertices):
                 continue
             v = e.bands[bi].vertices[vi]
+            self.sel_coords[(bi, vi)] = (v.x, v.y)
             r = 11
             ring = QGraphicsEllipseItem(-r, -r, 2 * r, 2 * r)
             ring.setPos(v.x, v.y)
@@ -1889,10 +1908,10 @@ class MainWindow(QMainWindow):
             self.apply_visibility()
             self._set_state("再追跡", "修正を取り消しました（できない修正）")
             return
-        def piece(path, color, dashed):
-            xs = [p["x"] for p in b.pending] + [p.get("ox", p["x"]) for p in b.pending]
-            lo, hi = min(xs) - 500, max(xs) + 500
-            sel = path[(path[:, 0] >= lo) & (path[:, 0] <= hi)]
+        def piece(path, rng, color, dashed):
+            """Only the part of the line that really changes (a little context on each side)."""
+            lo, hi = max(0, rng[0] - 12), min(len(path), rng[1] + 12)
+            sel = path[lo:hi]
             if len(sel) < 2:
                 return
             simp = cv2.approxPolyDP(sel.reshape(-1, 1, 2).astype(np.int32), 0.7, False).reshape(-1, 2)
@@ -1903,8 +1922,8 @@ class MainWindow(QMainWindow):
                 it.setPen(pen)
             self.scene.addItem(it)
             self.edit_preview_items.append(it)
-        piece(pv["old"], "#757575", True)
-        piece(pv["new"], "#00c853", False)
+        piece(pv["old"], pv["range_old"], "#757575", True)
+        piece(pv["new"], pv["range_new"], "#00c853", False)
         self.preview_label.setText(
             f"プレビュー: 変わる線は約{pv['changed_new']:.0f}px（もとは約{pv['changed_old']:.0f}px）／頂点 {pv['vertices_before']}→{pv['vertices_after']}個\n"
             f"{' / '.join(pv['messages'])}\n「適用」(Ctrl+Enter)で確定、「取消」(Esc)でやめます")
