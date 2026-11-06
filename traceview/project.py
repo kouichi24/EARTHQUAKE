@@ -27,7 +27,7 @@ def _snap_to_json(s):
         vertices=[v.to_dict() for v in s["vertices"]], manual_points=s["manual_points"], pending=s["pending"],
         line_zero=s["line_zero"], line_top=s["line_top"], line_bottom=s["line_bottom"],
         line_top_manual=s["line_top_manual"], line_bottom_manual=s["line_bottom_manual"],
-        line_zero_manual=s.get("line_zero_manual", False), sections=s.get("sections", []),
+        line_zero_manual=s.get("line_zero_manual", False), sections=s.get("sections", []), deleted_points=s.get("deleted_points", []),
         end_x=s["end_x"], complete=s["complete"], confirmed=s["confirmed"], y0=s["y0"],
         issues=[i.to_dict() if hasattr(i, "to_dict") else i for i in s["issues"]],
     )
@@ -39,7 +39,7 @@ def _snap_from_json(d):
         vertices=[Vertex.from_dict(v) for v in d["vertices"]], manual_points=d["manual_points"],
         pending=d["pending"], line_zero=d["line_zero"], line_top=d["line_top"], line_bottom=d["line_bottom"],
         line_top_manual=d["line_top_manual"], line_bottom_manual=d["line_bottom_manual"],
-        line_zero_manual=d.get("line_zero_manual", False), sections=d.get("sections", []),
+        line_zero_manual=d.get("line_zero_manual", False), sections=d.get("sections", []), deleted_points=d.get("deleted_points", []),
         end_x=d["end_x"], complete=d["complete"], confirmed=d["confirmed"], y0=d["y0"],
         issues=[Issue(**i) for i in d["issues"]],
     )

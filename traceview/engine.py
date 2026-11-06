@@ -470,6 +470,7 @@ class Engine:
     def _finish_band(self, b, path, rev, amb, inf, end_x, keep_manual=True):
         b.path, b.inferred, b.end_x = path, inf, end_x
         b.vertices = extract_vertices(path, rev, self.params.tip_min_prominence, self.ink)
+        self._apply_deleted(b)
         self._mark_manual(b)
         self._mark_suspect(b)
         W = self.work.shape[1]
@@ -500,6 +501,31 @@ class Engine:
             b.y0 = float(np.median(first[:, 1]))
         if not b.line_top_manual or not b.line_bottom_manual or True:
             self.reset_lines(b, only_auto=True)
+
+    def _apply_deleted(self, b, radius=7.0):
+        """Vertices the user deleted stay deleted when the line is traced again."""
+        if not b.deleted_points:
+            return
+        keep = []
+        for v in b.vertices:
+            if any(np.hypot(v.x - d["x"], v.y - d["y"]) <= radius for d in b.deleted_points):
+                continue
+            keep.append(v)
+        b.vertices = keep
+
+    def delete_vertex(self, bi, vi):
+        """Delete one vertex (undoable): it is taken out of the vertex list and out of all calculations
+        (maximum / minimum, wave count, period). The line itself is not changed; to drop part of the line
+        itself, fence it off with an exclusion range. A deleted vertex stays deleted when the line is traced again."""
+        b = self.bands[bi]
+        if not (0 <= vi < len(b.vertices)):
+            raise EngineError("削除する頂点が選ばれていません")
+        v = b.vertices[vi]
+        b.push_undo(self.params.undo_limit)
+        b.deleted_points.append(dict(x=float(v.x), y=float(v.y)))
+        b.vertices = [x for i, x in enumerate(b.vertices) if i != vi]
+        b.confirmed = False
+        return "頂点を削除しました（線は変えていません）"
 
     def _mark_suspect(self, b):
         """Vertices on stretches that leave the band's territory are candidates only (MS-04)."""

@@ -173,9 +173,12 @@ class MainWindow(QMainWindow):
                                    "画像上で横にドラッグして、測定する範囲（区間）を指定")
         self.t_read = self._act("値を読む", lambda: self.set_tool("read"), "V", True,
                                 "トレース上をクリックして、その点の値（補正前・円弧補正後）を読み取る")
+        self.a_delete = self._act("選択した点を削除", self.action_delete_selected, None,
+                                  tip="選んでいる頂点（画像上でクリック、または「頂点」タブの一覧で選択）を削除します。Delete／Backspaceキー。\n選んでいる読取点・区間・除外範囲の一覧があれば、それを削除します")
+        self.a_delete.setShortcuts([QKeySequence(Qt.Key_Delete), QKeySequence(Qt.Key_Backspace)])
         self.t_excl = self._act("除外範囲を囲む", lambda: self.set_tool("excl"), "E", True,
                                 "文字・汚れなど、線として取りたくない所を四角で囲む（その中の線は使われません）")
-        for a in (self.t_select, self.t_add, self.t_origin, self.t_section, self.t_read, self.t_excl):
+        for a in (self.t_select, self.t_add, self.a_delete, self.t_origin, self.t_section, self.t_read, self.t_excl):
             tb2.addAction(a)
         tb2.addSeparator()
         self.a_verify = self._act("検証して引き直す", lambda: self.action_verify(True), "F7",
@@ -397,6 +400,11 @@ class MainWindow(QMainWindow):
         bb.clicked.connect(self.action_apply_coords)
         gl.addRow(bb)
         vl.addWidget(g)
+        bdel = QPushButton("選んだ頂点を削除（Delete キー）")
+        bdel.clicked.connect(lambda: self.action_delete_selected(focus=self.v_table))
+        vl.addWidget(bdel)
+        vl.addWidget(QLabel("削除した頂点は、頂点の一覧と最大・最小などの計算から外れます（線は変わりません）。戻す(Ctrl+Z)で戻せます。"
+                            "線そのものを使いたくない所は、「除外範囲を囲む」(E)で囲んでください。"))
         self.tabs.addTab(vw, "頂点")
         # sections tab
         sw = QWidget()
@@ -656,7 +664,7 @@ class MainWindow(QMainWindow):
         self.cb_gap.blockSignals(False)
         self._sync_profile_combo()
         for a in (self.a_save, self.a_xlsx, self.a_svg, self.a_undo, self.a_redo, self.a_reset, self.a_apply, self.a_verify,
-                  self.a_cancel_pending, self.t_add, self.t_origin, self.t_section, self.t_read, self.t_excl, self.a_play, self.a_prev_v, self.a_next_v,
+                  self.a_cancel_pending, self.t_add, self.a_delete, self.t_origin, self.t_section, self.t_read, self.t_excl, self.a_play, self.a_prev_v, self.a_next_v,
                   self.a_zoom_sel):
             a.setEnabled(has_b)
 
@@ -2099,6 +2107,44 @@ class MainWindow(QMainWindow):
             self.rev_items.append(it)
         self.apply_visibility()
         self.view.center_on_point(r["x"], r["y"], zoom=max(1.0, self.view.transform().m11()))
+
+    # ------------------------------------------------------------------ delete
+    @staticmethod
+    def _inside(widget, parent):
+        while widget is not None:
+            if widget is parent:
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    def action_delete_selected(self, *_, focus=None):
+        """Delete / Backspace: the selected row of the list that has the focus, else the selected vertex."""
+        fw = focus if focus is not None else QApplication.focusWidget()
+        for table, fn in ((self.read_table, self.action_remove_readout), (self.sec_table, self.action_remove_section),
+                          (self.excl_table, lambda: self.action_remove_exclusion(False))):
+            if self._inside(fw, table) and table.selectionModel().selectedRows():
+                fn()
+                return
+        b = self.current_band()
+        if b is None:
+            return
+        if self.sel_vertex is None or not (0 <= self.sel_vertex < len(b.vertices)):
+            self._info("削除する点が選ばれていません。画像上の頂点をクリックするか、「頂点」タブの一覧で選んでから、Delete を押してください")
+            return
+        try:
+            msg = self.engine.delete_vertex(self.sel_band, self.sel_vertex)
+        except EngineError as ex:
+            self._show_error(str(ex))
+            return
+        self.sel_vertex = None
+        if self.sel_ring is not None and self.sel_ring.scene() is self.scene:
+            self.scene.removeItem(self.sel_ring)
+        self.sel_ring = None
+        self.dirty = True
+        self._build_band_items(self.sel_band)
+        self.apply_visibility()
+        self.refresh_panels()
+        self._info(f"{msg}（残り{len(b.vertices)}個。戻す(Ctrl+Z)で戻せます）")
 
     # --------------------------------------------------------------- readouts
     @staticmethod

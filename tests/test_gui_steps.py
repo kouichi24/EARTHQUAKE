@@ -75,3 +75,41 @@ def test_confirm_tab_flow_range_check_retrace_confirm_next(tmp_path):
     assert w.engine.bands[0].confirmed and w.engine.bands[1].traced
     assert w.sel_band == 1
     w.close()
+
+
+def test_delete_key_removes_the_selected_vertex_and_says_so_when_nothing_is_selected(tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeySequence
+    app = QApplication.instance() or QApplication([])
+    rgb, _ = make_sheet()
+    p = tmp_path / "d.png"
+    cv2.imwrite(str(p), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    w = MainWindow(sync_mode=True)
+    w.show()
+    w.open_file(str(p))
+    w.action_analyze()
+    keys = [s.toString() for s in w.a_delete.shortcuts()]
+    assert "Del" in keys and "Backspace" in keys                      # both keys are bound
+    b = w.engine.bands[0]
+    n = len(b.vertices)
+    # nothing selected: nothing is deleted and the user is told what to do
+    w.sel_vertex = None
+    w.action_delete_selected()
+    assert len(b.vertices) == n and "選ばれていません" in w.last_info
+    # select a vertex on the canvas (as a click does) and press Delete
+    w.on_vertex_selected(0, 5, from_canvas=True)
+    assert w.sel_vertex == 5
+    w.a_delete.trigger()                                              # what Delete / Backspace do
+    assert len(b.vertices) == n - 1 and w.sel_vertex is None and "削除しました" in w.last_info
+    assert w.sel_ring is None
+    # the list that has the focus wins: a selected reading point is deleted instead of a vertex
+    w.engine.read_point(0, float(b.path[300][0]), float(b.path[300][1]))
+    w.update_read_table()
+    w.read_table.selectRow(0)
+    w.on_vertex_selected(0, 3, from_canvas=True)
+    n2 = len(b.vertices)
+    w.action_delete_selected(focus=w.read_table)
+    assert not w.engine.readouts and len(b.vertices) == n2
+    # undo brings the vertex back
+    assert w.engine.undo(0) and len(b.vertices) == n
+    w.close()
