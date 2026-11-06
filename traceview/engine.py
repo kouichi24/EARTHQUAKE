@@ -467,12 +467,15 @@ class Engine:
         path = np.concatenate(pieces).astype(np.int32) if pieces else np.zeros((0, 2), np.int32)
         return path, rev, amb, inf, end_x
 
-    def _finish_band(self, b, path, rev, amb, inf, end_x, keep_manual=True):
+    def _finish_band(self, b, path, rev, amb, inf, end_x, keep_manual=True, recompute_vertices=True):
         b.path, b.inferred, b.end_x = path, inf, end_x
-        b.vertices = extract_vertices(path, rev, self.params.tip_min_prominence, self.ink)
-        self._apply_deleted(b)
-        self._mark_manual(b)
-        self._mark_suspect(b)
+        if recompute_vertices:
+            b.vertices = extract_vertices(path, rev, self.params.tip_min_prominence, self.ink)
+            self._apply_deleted(b)
+            path, inf = self._apply_erased(b, path, inf)       # erased stretches stay erased after a re-trace
+            end_x = b.end_x
+            self._mark_manual(b)
+            self._mark_suspect(b)
         W = self.work.shape[1]
         b.complete = end_x >= self.prepared.paper[2] - 0.03 * W
         b.issues = []
@@ -493,6 +496,10 @@ class Engine:
                     k = int(np.argmax(np.abs(seg[:, 1] - b.origin[1])))
                     b.issues.append(Issue("excursion", float(seg[k][0]), float(seg[k][1]),
                                           "隣の段の領域まで伸びる経路（所属要確認）"))
+        for j in b.cuts:
+            if 0 <= j < len(path):
+                b.issues.append(Issue("erased", float(path[j][0]), float(path[j][1]),
+                                      "手動で消した区間（ここで線が途切れています）"))
         if not b.complete and len(path):
             b.issues.append(Issue("untracked_end", float(path[-1][0]), float(path[-1][1]),
                                   "ここから右が未追跡（末端まで到達していません）"))
@@ -501,6 +508,66 @@ class Engine:
             b.y0 = float(np.median(first[:, 1]))
         if not b.line_top_manual or not b.line_bottom_manual or True:
             self.reset_lines(b, only_auto=True)
+
+    def _apply_erased(self, b, path, inf):
+        """Take the path points inside the user's erase rectangles out of the line (a gap is left there).
+        Vertices on erased points are dropped, indices are renumbered, and the places where the line is broken are
+        remembered in b.cuts. Returns the new path and the new estimated-link spans."""
+        old_cuts = list(b.cuts)
+        b.cuts = []
+        if not b.erased or len(path) == 0:
+            return path, inf
+        x, y = path[:, 0], path[:, 1]
+        inside = np.zeros(len(path), bool)
+        for r in b.erased:
+            inside |= (x >= r["x0"]) & (x <= r["x1"]) & (y >= r["y0"]) & (y <= r["y1"])
+        if not inside.any():
+            b.cuts = old_cuts
+            return path, inf
+        keep = ~inside
+        newidx = np.cumsum(keep) - 1
+        kept_old = np.flatnonzero(keep)
+        newpath = path[keep]
+        cuts = {int(g) for g in np.flatnonzero(np.diff(kept_old) > 1)}
+        for j in old_cuts:                                   # breaks that were already there
+            if j + 1 < len(keep) and keep[j] and keep[j + 1] and newidx[j + 1] - newidx[j] == 1:
+                cuts.add(int(newidx[j]))
+        b.cuts = sorted(cuts)
+        inf2 = [(int(newidx[a]), int(newidx[c])) for a, c in inf
+                if a < len(keep) and c < len(keep) and keep[a] and keep[c] and not inside[a:c + 1].any()]
+        verts = []
+        for v in b.vertices:
+            in_rect = any(r["x0"] <= v.x <= r["x1"] and r["y0"] <= v.y <= r["y1"] for r in b.erased)
+            if v.idx < len(keep) and keep[v.idx] and not in_rect:   # (a tip refined against the ink may sit just across the edge)
+                v.idx = int(newidx[v.idx])
+                verts.append(v)
+        b.vertices = verts
+        b.path, b.inferred = newpath, inf2
+        if len(newpath):
+            b.end_x = float(newpath[:, 0].max())
+        return newpath, inf2
+
+    def preview_erase(self, bi, rect):
+        """Which path points a rectangle would erase (nothing is changed)."""
+        b = self.bands[bi]
+        p = b.path
+        if len(p) == 0:
+            return np.zeros(0, bool)
+        return (p[:, 0] >= rect["x0"]) & (p[:, 0] <= rect["x1"]) & (p[:, 1] >= rect["y0"]) & (p[:, 1] <= rect["y1"])
+
+    def erase_rect(self, bi, x0, y0, x1, y1):
+        """Erase the traced line of a band inside a rectangle (undoable). The vertices of the rest stay as they are."""
+        b = self.bands[bi]
+        rect = dict(x0=float(min(x0, x1)), y0=float(min(y0, y1)), x1=float(max(x0, x1)), y1=float(max(y0, y1)))
+        n = int(self.preview_erase(bi, rect).sum())
+        if n == 0:
+            raise EngineError("囲んだ範囲に、この段のトレース線がありません")
+        b.push_undo(self.params.undo_limit)
+        b.erased.append(rect)
+        path, inf = self._apply_erased(b, b.path, b.inferred)
+        self._finish_band(b, path, [], [], inf, b.end_x, recompute_vertices=False)
+        b.confirmed = False
+        return n
 
     def _apply_deleted(self, b, radius=7.0):
         """Vertices the user deleted stay deleted when the line is traced again."""
@@ -526,6 +593,20 @@ class Engine:
         b.vertices = [x for i, x in enumerate(b.vertices) if i != vi]
         b.confirmed = False
         return "頂点を削除しました（線は変えていません）"
+
+    def delete_vertices(self, bi, vis):
+        """Delete several vertices in ONE undoable step (see delete_vertex)."""
+        b = self.bands[bi]
+        vis = sorted({int(i) for i in vis if 0 <= int(i) < len(b.vertices)})
+        if not vis:
+            raise EngineError("削除する頂点が選ばれていません")
+        b.push_undo(self.params.undo_limit)
+        for i in vis:
+            v = b.vertices[i]
+            b.deleted_points.append(dict(x=float(v.x), y=float(v.y)))
+        b.vertices = [x for i, x in enumerate(b.vertices) if i not in set(vis)]
+        b.confirmed = False
+        return f"頂点を{len(vis)}個削除しました（線は変えていません）"
 
     def _mark_suspect(self, b):
         """Vertices on stretches that leave the band's territory are candidates only (MS-04)."""
@@ -718,36 +799,67 @@ class Engine:
     def has_pending(self):
         return any(b.pending for b in self.bands)
 
-    def apply_pending(self, bi, progress=_noop):
+    def _compute_pending(self, b, mode="tail"):
+        """Work out the result of all pending edits of a band on a COPY. Raises EngineError if one cannot be done.
+
+        mode "tail" : a moved vertex re-traces the line from that vertex to the end
+        mode "local": a moved vertex only changes the line between the vertices before and after it
+        """
+        snap_before = b.snapshot()
+        msgs = []
+        moves = sorted([p for p in b.pending if p["type"] == "move"], key=lambda p: p["vi"])
+        adds = [p for p in b.pending if p["type"] == "add"]
+        work_b = Band(b.index, b.name, b.color)
+        work_b.restore(snap_before)
+        work_b.pending = []
+        for p in moves:
+            ok, msg = self._apply_move(work_b, p, local=(mode == "local"))
+            if not ok:
+                raise EngineError(msg)
+            msgs.append(msg)
+        for p in adds:
+            ok, msg = self._apply_add(work_b, p)
+            if not ok:
+                raise EngineError(msg)
+            msgs.append(msg)
+        return work_b, msgs
+
+    def preview_pending(self, bi, mode="local", progress=_noop):
+        """Show what the pending edits would do (nothing is changed): old and new path, how much of the line changes."""
+        b = self.bands[bi]
+        self.ensure_graph(progress)
+        work_b, msgs = self._compute_pending(b, mode)
+        old, new = b.path, work_b.path
+        n = min(len(old), len(new))
+        same_head = 0
+        if n:
+            diff = np.flatnonzero(np.any(old[:n] != new[:n], axis=1))
+            same_head = int(diff[0]) if len(diff) else n
+        # length of the changed stretch: compare the tails the same way
+        same_tail = 0
+        if n:
+            diff = np.flatnonzero(np.any(old[::-1][:n] != new[::-1][:n], axis=1))
+            same_tail = int(diff[0]) if len(diff) else n
+        changed_old = max(0, len(old) - same_head - same_tail)
+        changed_new = max(0, len(new) - same_head - same_tail)
+        return dict(old=old, new=new, messages=msgs, changed_old=changed_old / self.scale, changed_new=changed_new / self.scale,
+                    vertices_before=len(b.vertices), vertices_after=len(work_b.vertices),
+                    first_changed=(float(new[same_head][0]), float(new[same_head][1])) if same_head < len(new) else None)
+
+    def apply_pending(self, bi, progress=_noop, mode="tail"):
         """Apply all pending edits of one band. Returns (ok, message). On failure nothing changes."""
         b = self.bands[bi]
         if not b.pending:
             return True, "適用する修正はありません"
         self.ensure_graph(progress)
         snap_before = b.snapshot()
-        msgs = []
         try:
-            moves = sorted([p for p in b.pending if p["type"] == "move"], key=lambda p: p["vi"])
-            adds = [p for p in b.pending if p["type"] == "add"]
-            work_b = Band(b.index, b.name, b.color)
-            work_b.restore(snap_before)
-            work_b.pending = []
-            for p in moves:
-                ok, msg = self._apply_move(work_b, p)
-                if not ok:
-                    raise EngineError(msg)
-                msgs.append(msg)
-            for p in adds:
-                ok, msg = self._apply_add(work_b, p)
-                if not ok:
-                    raise EngineError(msg)
-                msgs.append(msg)
+            work_b, msgs = self._compute_pending(b, mode)
         except EngineError as e:
             b.restore(snap_before)
             b.issues.append(Issue("retrace_failed", b.pending[0]["x"], b.pending[0]["y"], str(e)))
             return False, str(e)
         b.push_undo(self.params.undo_limit)
-        keep = (b.undo, b.redo)
         b.restore(work_b.snapshot())
         b.pending = []
         b.confirmed = False
@@ -761,7 +873,7 @@ class Engine:
                 best, bd = i, d
         return best
 
-    def _apply_move(self, b, p):
+    def _apply_move(self, b, p, local=False):
         k = self._find_vertex(b, p["ox"], p["oy"], p["kind"])
         if k is None:
             return False, "移動対象の頂点が見つかりません"
@@ -769,6 +881,8 @@ class Engine:
         if P is None:
             return False, f"指定位置の近く({self.params.snap_radius}px以内)に画像の線がありません。修正前の結果を保持します"
         vs = b.vertices
+        if local and k + 1 < len(vs):
+            return self._apply_move_local(b, p, k, P, off)
         start_idx = vs[k - 1].idx if k > 0 else 0
         prefix = b.path[: start_idx + 1]
         a = prefix[-1]
@@ -808,6 +922,44 @@ class Engine:
         self._finish_band(b, newpath, rev2, [(a_ + shift, x_, y_) for a_, x_, y_ in amb], inf2, end_x)
         offtxt = f"（画像の線へ{off:.1f}px補正）" if off and off > 0.5 else ""
         return True, f"頂点を移動し、そこから先を再追跡しました{offtxt}"
+
+    def _apply_move_local(self, b, p, k, P, off):
+        """Move one vertex and re-route ONLY the stretch between the vertex before and the vertex after it.
+        The rest of the line is not touched."""
+        from .verify import reversals_from_path
+        vs, path = b.vertices, b.path
+        prev_idx = vs[k - 1].idx if k > 0 else 0
+        next_idx = vs[k + 1].idx
+        vk = vs[k].idx
+        if not (prev_idx < vk < next_idx) or next_idx >= len(path):
+            return False, "前後の頂点の位置が分かりません。「この点から先を引き直す」で試してください"
+        # only a short stretch of the line around the vertex is re-routed (at most 60 path points to each side)
+        start_idx = vk - max(3, min(60, (vk - prev_idx) // 2))
+        end_idx = vk + max(3, min(60, (next_idx - vk) // 2))
+        start_idx, end_idx = max(prev_idx, start_idx), min(next_idx, end_idx)
+        a_snap, _ = self._snap(path[start_idx][0], path[start_idx][1])
+        n_snap, _ = self._snap(path[end_idx][0], path[end_idx][1])
+        if a_snap is None or n_snap is None:
+            return False, "前後の点が画像の線の上にありません"
+        r1 = self._route(a_snap, P)
+        r2 = self._route(P, n_snap)
+        if r1 is None or r2 is None:
+            return False, "指定位置と前後の点を結ぶ線が見つかりません（途切れている可能性があります）。修正前の結果を保持します"
+        seg = np.concatenate([r1, r2[1:]]).astype(np.int32)
+        newpath = np.concatenate([path[:start_idx], seg, path[end_idx + 1:]]).astype(np.int32)
+        shift = len(seg) - (end_idx - start_idx + 1)
+        inf = []
+        for a_, c_ in b.inferred:
+            if c_ < start_idx:
+                inf.append((a_, c_))
+            elif a_ > end_idx:
+                inf.append((a_ + shift, c_ + shift))
+        prev_manual = [mp for mp in b.manual_points if np.hypot(mp["x"] - p["ox"], mp["y"] - p["oy"]) > 1]
+        prev_manual.append(dict(x=float(P[0]), y=float(P[1]), kind="moved"))
+        b.manual_points = prev_manual
+        self._finish_band(b, newpath, reversals_from_path(newpath), [], inf, b.end_x)
+        offtxt = f"（画像の線へ{off:.1f}px補正）" if off and off > 0.5 else ""
+        return True, f"頂点を移動しました。前後の頂点の間だけを引き直しました（他の線は変えていません）{offtxt}"
 
     def _continue_from(self, P, d):
         """Graph node / edge / pixels to continue with after arriving at skeleton pixel P heading d."""

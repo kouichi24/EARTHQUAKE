@@ -25,6 +25,7 @@ class ImageView(QGraphicsView):
         self.setMouseTracking(True)
         self.click_tool = False      # when True a left click is reported instead of panning
         self.drag_tool = False       # when True a left drag is reported (section tool) instead of panning
+        self.drag_over_items = False # when True a drag that starts on a vertex / line moves that item instead
         self._drag_start = None
         self._press_pos = None
 
@@ -49,6 +50,11 @@ class ImageView(QGraphicsView):
     def mousePressEvent(self, ev):
         self._press_pos = ev.position()
         if self.drag_tool and ev.button() == Qt.LeftButton:
+            item = self.itemAt(ev.position().toPoint())
+            if item is not None and (item.flags() & item.GraphicsItemFlag.ItemIsMovable) and self.drag_over_items:
+                self.setDragMode(QGraphicsView.NoDrag)      # a vertex / line under the mouse: it handles the drag itself
+                super().mousePressEvent(ev)
+                return
             self.setDragMode(QGraphicsView.NoDrag)
             self._drag_start = self.mapToScene(ev.position().toPoint())
             return
@@ -139,7 +145,6 @@ class VertexItem(QGraphicsEllipseItem):
         self.setBrush(QBrush(QColor(color)))
         self.setPen(QPen(QColor("black"), 1))
         self.setFlag(QGraphicsEllipseItem.ItemIgnoresTransformations, True)
-        self.setFlag(QGraphicsEllipseItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsEllipseItem.ItemSendsGeometryChanges, True)
         self._lc = None            # LineConstraint while dragging along the image's line
         self._dragging = False
@@ -150,7 +155,8 @@ class VertexItem(QGraphicsEllipseItem):
         self.setFlag(QGraphicsEllipseItem.ItemIsMovable, on)
 
     def mousePressEvent(self, ev):
-        self.win.on_vertex_selected(self.band_i, self.vi, from_canvas=True)
+        additive = bool(ev.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+        self.win.on_vertex_selected(self.band_i, self.vi, from_canvas=True, additive=additive)
         if (self.flags() & QGraphicsEllipseItem.ItemIsMovable) and self.win.follow_line:
             self._lc = self.win.make_line_constraint(self.pos().x(), self.pos().y())
         self._dragging = True

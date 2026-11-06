@@ -81,6 +81,9 @@ def find_problems(engine, band):
     # 2. jumps between neighbouring points
     step = np.hypot(*(path[1:] - path[:-1]).T.astype(float))
     jump = (step > 3.5) & ~inferred[:-1] & ~inferred[1:]
+    for j in band.cuts:                                   # a stretch erased by the user is not an error
+        if 0 <= j < len(jump):
+            jump[j] = False
     for i in np.flatnonzero(jump):
         out.append(Finding("jump", int(i), int(i) + 1, float(path[i][0]), float(path[i][1]), 2.0,
                            f"隣の点との距離が大きい（約{step[i] / engine.scale:.0f}px）"))

@@ -6,12 +6,12 @@ import traceback
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QSettings, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QImage, QKeySequence, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QImage, QKeySequence, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGraphicsEllipseItem, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGroupBox,
                                QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
-                               QMainWindow, QMessageBox, QProgressDialog, QPushButton, QSlider,
+                               QMainWindow, QMessageBox, QProgressDialog, QPushButton, QRadioButton, QSlider,
                                QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar,
                                QVBoxLayout, QWidget)
 
@@ -83,7 +83,7 @@ class MainWindow(QMainWindow):
         self.dirty = False
         self.project_path = None
         self.worker = None
-        self.auto_retrace = True
+        self.auto_retrace = False
         self.follow_line = True
         self.replay_idx = 0
         self.replay_marker = None
@@ -101,6 +101,11 @@ class MainWindow(QMainWindow):
         self.section_preview = None
         self.rev_items = []
         self.excl_items = []
+        self.sel_set = []            # selected vertices as (band, vertex) pairs; managed here, not by Qt
+        self.sel_rings = []
+        self.edit_preview_items = []
+        self.erase_pending = None    # rectangle (work px) waiting for "消す"
+        self.erase_items = []
         self.ver_range = None
         self.ver_range_item = None
         self._update_enabled()
@@ -121,6 +126,7 @@ class MainWindow(QMainWindow):
 
     def _build_actions(self):
         tb = QToolBar("ファイル")
+        tb.setObjectName("toolbar_tb")
         tb.setMovable(False)
         self.addToolBar(tb)
         self.a_open = self._act("開く…", self.action_open, "Ctrl+O", tip="PDF・画像を開く")
@@ -161,10 +167,11 @@ class MainWindow(QMainWindow):
         # editing tools
         self.addToolBarBreak()
         tb2 = QToolBar("編集")
+        tb2.setObjectName("toolbar_tb2")
         tb2.setMovable(False)
         self.addToolBar(tb2)
-        self.t_select = self._act("選択・移動", lambda: self.set_tool("select"), "S", True,
-                                  "頂点をドラッグして移動／線をドラッグして測定線を調整")
+        self.t_select = self._act("点の編集", lambda: self.set_tool("select"), "S", True,
+                                  "点の編集モード: 点をクリックして選ぶ（Ctrl+クリックで追加、空いた所をドラッグで枠選択）。\nドラッグで動かすのは、つかんだ1点だけ。Deleteで削除。修正は、プレビューを見てから適用します")
         self.t_add = self._act("頂点を追加", lambda: self.set_tool("add"), "A", True,
                                "取り逃した先端をクリックして追加")
         self.t_origin = self._act("起点を指定", lambda: self.set_tool("origin"), "O", True,
@@ -176,9 +183,11 @@ class MainWindow(QMainWindow):
         self.a_delete = self._act("選択した点を削除", self.action_delete_selected, None,
                                   tip="選んでいる頂点（画像上でクリック、または「頂点」タブの一覧で選択）を削除します。Delete／Backspaceキー。\n選んでいる読取点・区間・除外範囲の一覧があれば、それを削除します")
         self.a_delete.setShortcuts([QKeySequence(Qt.Key_Delete), QKeySequence(Qt.Key_Backspace)])
+        self.t_erase = self._act("線の一部を消す", lambda: self.set_tool("erase"), "X", True,
+                                 "トレース線を消したい所を四角で囲む（プレビューのあと、消す）。画像の線そのものは変わりません")
         self.t_excl = self._act("除外範囲を囲む", lambda: self.set_tool("excl"), "E", True,
                                 "文字・汚れなど、線として取りたくない所を四角で囲む（その中の線は使われません）")
-        for a in (self.t_select, self.t_add, self.a_delete, self.t_origin, self.t_section, self.t_read, self.t_excl):
+        for a in (self.t_select, self.t_add, self.a_delete, self.t_erase, self.t_origin, self.t_section, self.t_read, self.t_excl):
             tb2.addAction(a)
         tb2.addSeparator()
         self.a_verify = self._act("検証して引き直す", lambda: self.action_verify(True), "F7",
@@ -193,8 +202,9 @@ class MainWindow(QMainWindow):
         self.cb_follow.setChecked(True)
         self.cb_follow.setToolTip("オン: 頂点をドラッグすると、画像の線の上だけを動く（つながっていない別の線へは飛ばない）。\nオフ: 自由に動かせる")
         self.cb_follow.toggled.connect(lambda v: setattr(self, "follow_line", v))
-        self.cb_auto = QCheckBox("移動後に自動で再追跡")
-        self.cb_auto.setChecked(True)
+        self.cb_auto = QCheckBox("動かしたらすぐ適用")
+        self.cb_auto.setToolTip("オフ（既定）: 動かすとプレビューを表示し、「適用」(Ctrl+Enter)で確定。Escで取り消し。\nオン: プレビューなしで、すぐ適用します")
+        self.cb_auto.setChecked(False)
         self.cb_auto.toggled.connect(lambda v: setattr(self, "auto_retrace", v))
         tb2.addAction(self.a_next_band)
         tb2.addAction(self.a_follow)
@@ -212,6 +222,7 @@ class MainWindow(QMainWindow):
         # view toolbar
         self.addToolBarBreak()
         tb3 = QToolBar("表示")
+        tb3.setObjectName("toolbar_tb3")
         tb3.setMovable(False)
         self.addToolBar(tb3)
         self.cb_image = QCheckBox("元画像")
@@ -280,6 +291,71 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.band_list)
         self.tabs = QTabWidget()
         lay.addWidget(self.tabs, 1)
+        # edit tab
+        ew = QWidget()
+        el = QVBoxLayout(ew)
+        el.addWidget(QLabel("【点の編集モード】点をクリックして選び、ドラッグで1点だけ動かします。動かすと、まずプレビューを表示し、確認してから適用します。"))
+        self.sel_title = QLabel("選択中: 0点")
+        self.sel_title.setStyleSheet("font-weight:bold")
+        el.addWidget(self.sel_title)
+        self.sel_list = QListWidget()
+        self.sel_list.setMaximumHeight(110)
+        el.addWidget(self.sel_list)
+        rs = QHBoxLayout()
+        b_clear = QPushButton("選択を解除")
+        b_clear.clicked.connect(self.clear_selection)
+        b_del = QPushButton("選んだ点を削除 (Delete)")
+        b_del.clicked.connect(lambda: self.action_delete_selected(focus=self.sel_list))
+        rs.addWidget(b_clear)
+        rs.addWidget(b_del)
+        el.addLayout(rs)
+        el.addWidget(QLabel("選び方: クリック＝その1点／Ctrl（Shift）+クリック＝追加・解除／空いた所をドラッグ＝枠で選ぶ／Esc＝解除"))
+        gm = QGroupBox("動かしたときの引き直し方")
+        gml = QVBoxLayout(gm)
+        self.rb_local = QRadioButton("この点の前後だけ引き直す（おすすめ。ほかの線は変わりません）")
+        self.rb_tail = QRadioButton("この点から先を、すべて引き直す")
+        self.rb_local.setChecked(True)
+        self.rb_local.toggled.connect(lambda _v: self.show_edit_preview(self.sel_band) if self.current_band() and self.current_band().pending else None)
+        gml.addWidget(self.rb_local)
+        gml.addWidget(self.rb_tail)
+        el.addWidget(gm)
+        self.pend_title = QLabel("未適用の修正: なし")
+        self.pend_title.setStyleSheet("font-weight:bold")
+        el.addWidget(self.pend_title)
+        self.preview_label = QLabel("")
+        self.preview_label.setWordWrap(True)
+        el.addWidget(self.preview_label)
+        rp = QHBoxLayout()
+        b_apply = QPushButton("適用 (Ctrl+Enter)")
+        b_apply.clicked.connect(self.action_apply)
+        b_cancel = QPushButton("取消 (Esc)")
+        b_cancel.clicked.connect(self.action_cancel_pending)
+        rp.addWidget(b_apply)
+        rp.addWidget(b_cancel)
+        el.addLayout(rp)
+        gl = QGroupBox("線の一部を消す")
+        gll = QVBoxLayout(gl)
+        gll.addWidget(QLabel("「線の一部を消す」(X)で、消したい所を四角で囲むと、消される部分が赤い点で出ます。確認して「消す」。"
+                             "画像の線そのものは変わらず、トレース線に切れ目ができます。"))
+        self.erase_label = QLabel("消した範囲: なし")
+        gll.addWidget(self.erase_label)
+        re_ = QHBoxLayout()
+        b_er = QPushButton("消す")
+        b_er.clicked.connect(self.action_apply_erase)
+        b_er_c = QPushButton("やめる (Esc)")
+        b_er_c.clicked.connect(self.cancel_pending_erase)
+        b_er_t = QPushButton("囲むモードにする (X)")
+        b_er_t.clicked.connect(lambda: self.set_tool("erase"))
+        re_.addWidget(b_er_t)
+        re_.addWidget(b_er)
+        re_.addWidget(b_er_c)
+        gll.addLayout(re_)
+        el.addWidget(gl)
+        el.addStretch(1)
+        escroll = QScrollArea()
+        escroll.setWidgetResizable(True)
+        escroll.setWidget(ew)
+        self.tabs.insertTab(1, escroll, "点の編集")
         # measure tab
         mw = QWidget()
         ml = QVBoxLayout(mw)
@@ -664,7 +740,7 @@ class MainWindow(QMainWindow):
         self.cb_gap.blockSignals(False)
         self._sync_profile_combo()
         for a in (self.a_save, self.a_xlsx, self.a_svg, self.a_undo, self.a_redo, self.a_reset, self.a_apply, self.a_verify,
-                  self.a_cancel_pending, self.t_add, self.a_delete, self.t_origin, self.t_section, self.t_read, self.t_excl, self.a_play, self.a_prev_v, self.a_next_v,
+                  self.a_cancel_pending, self.t_add, self.a_delete, self.t_erase, self.t_origin, self.t_section, self.t_read, self.t_excl, self.a_play, self.a_prev_v, self.a_next_v,
                   self.a_zoom_sel):
             a.setEnabled(has_b)
 
@@ -1318,6 +1394,8 @@ class MainWindow(QMainWindow):
         self.rev_items = []
         self.excl_items = []
         self.range_items = []
+        self.sel_set, self.sel_rings, self.edit_preview_items, self.erase_items = [], [], [], []
+        self.erase_pending = None
         self.ver_range_item = None
         self.pix_item = None
         if e.work is None:
@@ -1363,9 +1441,16 @@ class MainWindow(QMainWindow):
         self._clear_band_items(bi)
         d = dict(path=None, inferred=[], vertices=[], lines={}, issues=[], pending=[])
         pts = b.path
+        self.sel_set = [t for t in self.sel_set if t[0] != bi]              # vertex numbers change when a band is redrawn
         if len(pts) > 1:
-            simp = cv2.approxPolyDP(pts.reshape(-1, 1, 2).astype(np.int32), 0.7, False).reshape(-1, 2)
-            d["path"] = make_path_item(polyline_path(simp), b.color, 2)
+            qpath = QPainterPath()
+            bounds = [0] + [c + 1 for c in sorted(set(b.cuts))] + [len(pts)]   # a stretch erased by the user stays a gap
+            for s0, s1 in zip(bounds[:-1], bounds[1:]):
+                seg = pts[s0:s1]
+                if len(seg) >= 2:
+                    simp = cv2.approxPolyDP(seg.reshape(-1, 1, 2).astype(np.int32), 0.7, False).reshape(-1, 2)
+                    qpath.addPath(polyline_path(simp))
+            d["path"] = make_path_item(qpath, b.color, 2)
             self.scene.addItem(d["path"])
             for a, c in b.inferred:
                 seg = pts[a:c + 1]
@@ -1477,7 +1562,8 @@ class MainWindow(QMainWindow):
         hide = self.a_hide_all.isChecked()
         self.a_hide_all.setText("図形を表示に戻す" if hide else "図形を全部消す")
         for extra in (self.sel_ring, self.replay_marker, self.section_preview, *self.rev_items, *self.excl_items,
-                      self.ver_range_item, *getattr(self, "range_items", [])):
+                      self.ver_range_item, *getattr(self, "range_items", []), *self.sel_rings, *self.edit_preview_items,
+                      *self.erase_items):
             if extra is not None and extra.scene() is self.scene:
                 extra.setVisible(not hide)
         if self.pix_item is not None:
@@ -1512,17 +1598,19 @@ class MainWindow(QMainWindow):
     def set_tool(self, tool):
         self.tool = tool
         for name, act in (("select", self.t_select), ("add", self.t_add), ("origin", self.t_origin),
-                          ("section", self.t_section), ("read", self.t_read), ("excl", self.t_excl),
+                          ("section", self.t_section), ("read", self.t_read), ("excl", self.t_excl), ("erase", self.t_erase),
                           ("vrange", None), ("brange", None)):
             if act is None:
                 continue
             act.setChecked(name == tool)
         self.view.click_tool = tool in ("add", "origin", "calib", "read")
-        self.view.drag_tool = tool in ("section", "excl", "vrange", "brange")
+        self.view.drag_tool = tool in ("section", "excl", "vrange", "brange", "select", "erase")
+        self.view.drag_over_items = tool == "select"
         for d in self.band_items.values():
             for it in d["vertices"]:
                 it.set_editable(tool == "select")
-        hint = {"select": "頂点をドラッグして移動／測定線は上下にドラッグ", "add": "追加する頂点（先端）をクリック",
+        hint = {"select": "点の編集: 点をクリックで選択（Ctrl+クリックで追加）／空いた所をドラッグで枠選択／点をドラッグで1点だけ移動／Deleteで削除／測定線は上下にドラッグ",
+                "erase": "トレース線を消したい所を、四角でドラッグして囲む", "add": "追加する頂点（先端）をクリック",
                 "origin": "選択中の段の起点（波形の左端）をクリック", "calib": "1点目、2点目の順にクリック",
                 "section": "測定したい範囲を横にドラッグ（選択中の段に追加）",
                 "read": "値を読みたい点をトレース上でクリック（選択中の段）",
@@ -1557,6 +1645,7 @@ class MainWindow(QMainWindow):
         self.update_exclusion_table()
         self._update_step_actions()
         self.update_confirm_tab()
+        self.update_edit_tab()
         self._draw_range_items()
         b = self.current_band()
         self.cb_confirm.blockSignals(True)
@@ -1648,32 +1737,32 @@ class MainWindow(QMainWindow):
         if rows:
             self.on_vertex_selected(self.sel_band, rows[0].row(), from_canvas=False)
 
-    def on_vertex_selected(self, bi, vi, from_canvas=False):
+    def on_vertex_selected(self, bi, vi, from_canvas=False, additive=False):
+        """Select a vertex. A plain click selects only this one; Ctrl/Shift+click adds or removes it."""
         e = self.engine
         if bi != self.sel_band:
             self.sel_band = bi
             self.band_list.blockSignals(True)
             self.band_list.setCurrentRow(bi)
             self.band_list.blockSignals(False)
+            self.sel_set = [t for t in self.sel_set if t[0] == bi]
             self.refresh_panels()
         b = e.bands[bi]
         if not (0 <= vi < len(b.vertices)):
             return
-        self.sel_vertex = vi
+        if additive:
+            if (bi, vi) in self.sel_set:
+                self.sel_set.remove((bi, vi))
+            else:
+                self.sel_set.append((bi, vi))
+        else:
+            self.sel_set = [(bi, vi)]
+        self.sel_vertex = vi if (bi, vi) in self.sel_set else (self.sel_set[-1][1] if self.sel_set else None)
         v = b.vertices[vi]
         inv = 1 / e.scale
         self.sp_x.setValue(v.x * inv)
         self.sp_y.setValue(v.y * inv)
-        if self.sel_ring is not None and self.sel_ring.scene() is self.scene:
-            self.scene.removeItem(self.sel_ring)
-        r = 11
-        ring = QGraphicsEllipseItem(-r, -r, 2 * r, 2 * r)
-        ring.setPos(v.x, v.y)
-        ring.setPen(QPen(QColor("#ffeb3b"), 3))
-        ring.setFlag(QGraphicsEllipseItem.ItemIgnoresTransformations, True)
-        ring.setZValue(40)
-        self.scene.addItem(ring)
-        self.sel_ring = ring
+        self._draw_selection()
         if from_canvas:
             self.v_table.blockSignals(True)
             self.v_table.selectRow(vi)
@@ -1681,6 +1770,52 @@ class MainWindow(QMainWindow):
             self.v_table.blockSignals(False)
         else:
             self.zoom_to_selected(keep_zoom=True)
+
+    def clear_selection(self):
+        self.sel_set = []
+        self.sel_vertex = None
+        self._draw_selection()
+
+    def _draw_selection(self):
+        for it in self.sel_rings:
+            if it.scene() is self.scene:
+                self.scene.removeItem(it)
+        self.sel_rings = []
+        self.sel_ring = None
+        e = self.engine
+        for k, (bi, vi) in enumerate(self.sel_set):
+            if bi >= len(e.bands) or vi >= len(e.bands[bi].vertices):
+                continue
+            v = e.bands[bi].vertices[vi]
+            r = 11
+            ring = QGraphicsEllipseItem(-r, -r, 2 * r, 2 * r)
+            ring.setPos(v.x, v.y)
+            last = (bi, vi) == (self.sel_band, self.sel_vertex)
+            ring.setPen(QPen(QColor("#ffeb3b" if last else "#00e5ff"), 3))
+            ring.setFlag(QGraphicsEllipseItem.ItemIgnoresTransformations, True)
+            ring.setZValue(40)
+            self.scene.addItem(ring)
+            self.sel_rings.append(ring)
+            if last:
+                self.sel_ring = ring
+        self.apply_visibility()
+        self.update_edit_tab()
+
+    def select_in_rect(self, a, b, additive=False):
+        """Frame-select the vertices of the current band inside a rectangle."""
+        bd = self.current_band()
+        if bd is None:
+            return
+        x0, x1, y0, y1 = min(a.x(), b.x()), max(a.x(), b.x()), min(a.y(), b.y()), max(a.y(), b.y())
+        if (x1 - x0) < 4 and (y1 - y0) < 4:
+            if not additive:
+                self.clear_selection()
+            return
+        hit = [(self.sel_band, i) for i, v in enumerate(bd.vertices) if x0 <= v.x <= x1 and y0 <= v.y <= y1]
+        self.sel_set = (self.sel_set + [t for t in hit if t not in self.sel_set]) if additive else hit
+        self.sel_vertex = self.sel_set[-1][1] if self.sel_set else None
+        self._draw_selection()
+        self._info(f"{len(hit)}点を選びました" if hit else "枠の中に点がありません")
 
     def zoom_to_selected(self, keep_zoom=False):
         b = self.current_band()
@@ -1709,17 +1844,71 @@ class MainWindow(QMainWindow):
         return lc
 
     def on_vertex_dragged(self, bi, vi, x, y):
+        """A vertex was moved by the mouse: ONLY that vertex. The edit is shown as a preview first."""
         e = self.engine
+        if len(self.sel_set) > 1:
+            self._info("動かすのは、つかんだ1点だけです（ほかの選択した点は動きません）")
         e.set_pending_move(bi, vi, x, y)
         self.dirty = True
         self._build_band_items(bi)
         self.apply_visibility()
         self.update_issue_list()
         self._update_review_label()
+        self.update_edit_tab()
         if self.auto_retrace:
             self.apply_pending(bi)
         else:
-            self._set_state("再追跡", "未適用の修正あり")
+            self._set_state("再追跡", "未適用の修正あり（プレビュー）")
+            self.show_edit_preview(bi)
+            self.update_edit_tab()
+
+    def move_mode(self):
+        return "local" if self.rb_local.isChecked() else "tail"
+
+    def _clear_edit_preview(self):
+        for it in self.edit_preview_items:
+            if it.scene() is self.scene:
+                self.scene.removeItem(it)
+        self.edit_preview_items = []
+
+    def show_edit_preview(self, bi):
+        """Draw what the pending edits would do: old line (grey dots) and new line (green), plus how far it reaches."""
+        self._clear_edit_preview()
+        e = self.engine
+        b = e.bands[bi]
+        if not b.pending:
+            self.preview_label.setText("未適用の修正はありません")
+            return
+        try:
+            pv = e.preview_pending(bi, self.move_mode())
+        except EngineError as ex:
+            self.preview_label.setText(f"この修正はできません: {ex}")
+            self._info(f"この修正はできません: {ex}")
+            e.cancel_pending(bi)
+            self._build_band_items(bi)
+            self.apply_visibility()
+            self._set_state("再追跡", "修正を取り消しました（できない修正）")
+            return
+        def piece(path, color, dashed):
+            xs = [p["x"] for p in b.pending] + [p.get("ox", p["x"]) for p in b.pending]
+            lo, hi = min(xs) - 500, max(xs) + 500
+            sel = path[(path[:, 0] >= lo) & (path[:, 0] <= hi)]
+            if len(sel) < 2:
+                return
+            simp = cv2.approxPolyDP(sel.reshape(-1, 1, 2).astype(np.int32), 0.7, False).reshape(-1, 2)
+            it = make_path_item(polyline_path(simp), color, 3, z=47)
+            if dashed:
+                pen = it.pen()
+                pen.setStyle(Qt.DotLine)
+                it.setPen(pen)
+            self.scene.addItem(it)
+            self.edit_preview_items.append(it)
+        piece(pv["old"], "#757575", True)
+        piece(pv["new"], "#00c853", False)
+        self.preview_label.setText(
+            f"プレビュー: 変わる線は約{pv['changed_new']:.0f}px（もとは約{pv['changed_old']:.0f}px）／頂点 {pv['vertices_before']}→{pv['vertices_after']}個\n"
+            f"{' / '.join(pv['messages'])}\n「適用」(Ctrl+Enter)で確定、「取消」(Esc)でやめます")
+        self.apply_visibility()
 
     def action_apply_coords(self):
         b = self.current_band()
@@ -1786,10 +1975,13 @@ class MainWindow(QMainWindow):
             return
         self._set_state("再追跡", "再追跡中…")
 
+        mode = self.move_mode()
+
         def job(cb):
-            return e.apply_pending(bi, cb)
+            return e.apply_pending(bi, cb, mode)
 
         def done(res):
+            self._clear_edit_preview()
             ok, msg = res
             self._set_state("再追跡", "完了" if ok else "失敗（修正前の結果を保持）")
             if not ok:
@@ -1808,10 +2000,19 @@ class MainWindow(QMainWindow):
         self.apply_pending(self.sel_band)
 
     def action_cancel_pending(self):
+        """Esc: cancel the unapplied edits and the erase waiting for confirmation; with nothing pending, clear the selection."""
         b = self.current_band()
         if b is None:
             return
+        if self.erase_pending is not None:
+            self.cancel_pending_erase()
+            return
+        if not b.pending:
+            if self.sel_set:
+                self.clear_selection()
+            return
         self.engine.cancel_pending(self.sel_band)
+        self._clear_edit_preview()
         self._build_band_items(self.sel_band)
         self.apply_visibility()
         self.refresh_panels()
@@ -2108,6 +2309,99 @@ class MainWindow(QMainWindow):
         self.apply_visibility()
         self.view.center_on_point(r["x"], r["y"], zoom=max(1.0, self.view.transform().m11()))
 
+    # ---------------------------------------------------- erase part of the line
+    def set_pending_erase(self, x0, y0, x1, y1):
+        """A rectangle was dragged: show which part of the traced line would be erased, then wait for \"消す\"."""
+        e = self.engine
+        b = self.current_band()
+        if b is None or len(b.path) == 0:
+            return
+        rect = dict(x0=min(x0, x1), y0=min(y0, y1), x1=max(x0, x1), y1=max(y0, y1))
+        if rect["x1"] - rect["x0"] < 4 or rect["y1"] - rect["y0"] < 4:
+            return
+        mask = e.preview_erase(self.sel_band, rect)
+        self._clear_erase_items()
+        if not mask.any():
+            self.erase_pending = None
+            self._info("囲んだ範囲に、この段のトレース線がありません")
+            self.update_edit_tab()
+            return
+        self.erase_pending = rect
+        rc = QGraphicsRectItem(rect["x0"], rect["y0"], rect["x1"] - rect["x0"], rect["y1"] - rect["y0"])
+        rc.setBrush(QBrush(QColor(244, 67, 54, 40)))
+        pen = QPen(QColor("#f44336"), 2, Qt.DashLine)
+        pen.setCosmetic(True)
+        rc.setPen(pen)
+        rc.setZValue(46)
+        self.scene.addItem(rc)
+        self.erase_items.append(rc)
+        pts = b.path[mask]
+        simp = pts[:: max(1, len(pts) // 600)]
+        for q in simp:
+            m = QGraphicsEllipseItem(-2, -2, 4, 4)
+            m.setPos(float(q[0]), float(q[1]))
+            m.setBrush(QBrush(QColor("#f44336")))
+            m.setPen(QPen(Qt.NoPen))
+            m.setZValue(46)
+            self.scene.addItem(m)
+            self.erase_items.append(m)
+        self.erase_count = int(mask.sum())
+        self.apply_visibility()
+        self.update_edit_tab()
+        self._info(f"赤い点の部分（{self.erase_count / e.scale:.0f}px分）の線を消します。「消す」で確定、Escでやめます")
+
+    def _clear_erase_items(self):
+        for it in self.erase_items:
+            if it.scene() is self.scene:
+                self.scene.removeItem(it)
+        self.erase_items = []
+
+    def cancel_pending_erase(self):
+        self.erase_pending = None
+        self._clear_erase_items()
+        self.update_edit_tab()
+        self._info("線を消すのをやめました")
+
+    def action_apply_erase(self):
+        r = self.erase_pending
+        if r is None:
+            self._info("先に「線の一部を消す」(X)で、消したい所を四角で囲んでください")
+            return
+        try:
+            n = self.engine.erase_rect(self.sel_band, r["x0"], r["y0"], r["x1"], r["y1"])
+        except EngineError as ex:
+            self._show_error(str(ex))
+            return
+        self.erase_pending = None
+        self._clear_erase_items()
+        self.dirty = True
+        self._build_band_items(self.sel_band)
+        self.apply_visibility()
+        self.refresh_panels()
+        self._info(f"線を{n / self.engine.scale:.0f}px分消しました（戻す(Ctrl+Z)で戻せます）")
+
+    # ---------------------------------------------------------- edit tab
+    def update_edit_tab(self):
+        e = self.engine
+        b = self.current_band()
+        if b is None:
+            return
+        chosen = [(bi, vi) for (bi, vi) in self.sel_set if bi == self.sel_band and vi < len(b.vertices)]
+        inv = 1 / e.scale
+        self.sel_list.clear()
+        for bi, vi in chosen:
+            v = b.vertices[vi]
+            self.sel_list.addItem(f"{'山' if v.kind == 'peak' else '谷'}  #{vi + 1}  X={v.x * inv:.0f}  Y={v.y * inv:.0f}")
+        self.sel_title.setText(f"選択中: {len(chosen)}点（{b.name}）" + ("　※ドラッグで動くのは、つかんだ1点だけ" if len(chosen) > 1 else ""))
+        n_pend = len(b.pending)
+        self.pend_title.setText(f"未適用の修正: {n_pend}件" if n_pend else "未適用の修正: なし")
+        if not n_pend:
+            self.preview_label.setText("（点をドラッグして動かすと、ここにプレビューの情報が出ます）")
+        if self.erase_pending is not None:
+            self.erase_label.setText(f"消す予定の線: 約{getattr(self, 'erase_count', 0) / e.scale:.0f}px分（赤い点）。「消す」で確定／Escでやめます")
+        else:
+            self.erase_label.setText("消した範囲: " + (f"{len(b.erased)}か所（戻す(Ctrl+Z)で戻せます）" if b.erased else "なし"))
+
     # ------------------------------------------------------------------ delete
     @staticmethod
     def _inside(widget, parent):
@@ -2128,18 +2422,18 @@ class MainWindow(QMainWindow):
         b = self.current_band()
         if b is None:
             return
-        if self.sel_vertex is None or not (0 <= self.sel_vertex < len(b.vertices)):
+        chosen = [vi for (bi, vi) in self.sel_set if bi == self.sel_band and 0 <= vi < len(b.vertices)]
+        if not chosen and self.sel_vertex is not None and 0 <= self.sel_vertex < len(b.vertices):
+            chosen = [self.sel_vertex]
+        if not chosen:
             self._info("削除する点が選ばれていません。画像上の頂点をクリックするか、「頂点」タブの一覧で選んでから、Delete を押してください")
             return
         try:
-            msg = self.engine.delete_vertex(self.sel_band, self.sel_vertex)
+            msg = self.engine.delete_vertices(self.sel_band, chosen)
         except EngineError as ex:
             self._show_error(str(ex))
             return
-        self.sel_vertex = None
-        if self.sel_ring is not None and self.sel_ring.scene() is self.scene:
-            self.scene.removeItem(self.sel_ring)
-        self.sel_ring = None
+        self.clear_selection()
         self.dirty = True
         self._build_band_items(self.sel_band)
         self.apply_visibility()
@@ -2204,7 +2498,13 @@ class MainWindow(QMainWindow):
         bd = self.current_band()
         if bd is None:
             return
-        if self.tool == "brange":
+        if self.tool == "select":
+            y0, y1 = a.y(), b.y()
+            color, pen_col = QColor(33, 150, 243, 40), "#2196f3"
+        elif self.tool == "erase":
+            y0, y1 = a.y(), b.y()
+            color, pen_col = QColor(244, 67, 54, 60), "#f44336"
+        elif self.tool == "brange":
             y0, y1 = a.y(), b.y()
             color, pen_col = QColor(76, 175, 80, 60), "#4caf50"
         elif self.tool == "excl":
@@ -2230,7 +2530,11 @@ class MainWindow(QMainWindow):
         if self.section_preview is not None:
             self.scene.removeItem(self.section_preview)
             self.section_preview = None
-        if self.tool == "brange":
+        if self.tool == "select":
+            self.select_in_rect(a, b, additive=bool(QApplication.keyboardModifiers() & (Qt.ControlModifier | Qt.ShiftModifier)))
+        elif self.tool == "erase":
+            self.set_pending_erase(a.x(), a.y(), b.x(), b.y())
+        elif self.tool == "brange":
             self.set_pending_range(a.y(), b.y())
         elif self.tool == "excl":
             self.add_exclusion_rect(a.x(), a.y(), b.x(), b.y())
