@@ -138,3 +138,31 @@ def test_selection_survives_a_refused_move_and_a_cancel(win):
     win.on_vertex_dragged(0, 9, v.x + 3, v.y)
     win.action_cancel_pending()                                      # cancel the pending edit: still selected
     assert len(win.sel_set) == 3
+
+
+def test_end_handle_takes_the_trace_across_a_gap_with_preview_and_enter(tmp_path):
+    from tests.test_gap_jump import _gap_engine
+    from traceview.gui.view import EndHandleItem
+    app = QApplication.instance() or QApplication([])
+    e = _gap_engine(tmp_path)
+    w = MainWindow(sync_mode=True)
+    w.show()
+    w.engine = e
+    w.rebuild_scene()
+    w.set_tool("select")
+    h = w.band_items[0]["end"]
+    assert isinstance(h, EndHandleItem) and h.flags() & QGraphicsItem.ItemIsMovable
+    # drag the end across the gap: the item lands on the far line and a dashed link is shown
+    h._lc = w.make_line_constraint(h.pos().x(), h.pos().y())
+    h._dragging = True
+    h.setPos(QPointF(215.0, 250.0))
+    assert w.bridge_item is not None
+    h._dragging = False
+    w.show_drag_bridge(None)
+    assert w.bridge_item is None
+    w.on_end_dragged(0, h.pos().x(), h.pos().y())
+    b = e.bands[0]
+    assert b.pending and w.edit_preview_items and not b.complete        # preview only
+    w.view.applyRequested.emit()                                          # Enter in the image area
+    assert not b.pending and b.complete and b.inferred
+    w.close()

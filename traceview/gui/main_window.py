@@ -24,7 +24,7 @@ from ..profiles import PROFILES, get as get_profile
 from ..project import SourceMismatch, load_project, save_project
 from ..svg_out import export_svg
 from ..verify import KINDS as VERIFY_KINDS, find_problems, verify_and_repair
-from .view import ImageView, LineItem, PyramidItem, VertexItem, make_path_item, polyline_path
+from .view import EndHandleItem, ImageView, LineItem, PyramidItem, VertexItem, make_path_item, polyline_path
 
 ISSUE_LABEL = {"ambiguous": "所属の曖昧さ", "untracked_end": "末端の未追跡", "inferred": "推定接続",
                "excursion": "他の段への逸脱", "no_origin": "起点未検出", "retrace_failed": "再追跡の失敗",
@@ -96,11 +96,15 @@ class MainWindow(QMainWindow):
         self.view.sceneClicked.connect(self.on_scene_clicked)
         self.view.cursorMoved.connect(self._on_cursor)
         self.view.zoomChanged.connect(self.apply_visibility)
+        self.view.applyRequested.connect(self.action_apply)
         self.view.dragMoved.connect(self._section_drag_preview)
         self.view.dragFinished.connect(self._section_drag_done)
         self.section_preview = None
         self.rev_items = []
         self.excl_items = []
+        self.bridge_item = None
+        self.cand = []              # exclusion candidates found by the program
+        self.cand_items = []
         self.sel_coords = {}
         self.sel_set = []            # selected vertices as (band, vertex) pairs; managed here, not by Qt
         self.sel_rings = []
@@ -538,6 +542,25 @@ class MainWindow(QMainWindow):
         xl = QVBoxLayout(xw)
         xl.addWidget(QLabel("文字・汚れなど、線として取りたくない所を、「除外範囲を囲む」(E)で四角にドラッグして囲むと、"
                             "その中の線は使われなくなり、該当する段は引き直されます（他の段は変わりません）。"))
+        bcand = QPushButton("除外の候補を探す（解析の前でも使えます）")
+        bcand.clicked.connect(self.action_find_candidates)
+        xl.addWidget(bcand)
+        self.cand_list = QListWidget()
+        self.cand_list.setMaximumHeight(130)
+        self.cand_list.currentRowChanged.connect(self.on_candidate_row)
+        xl.addWidget(self.cand_list)
+        rc = QHBoxLayout()
+        bca = QPushButton("すべてチェック")
+        bca.clicked.connect(lambda: self._check_all_candidates(True))
+        bcn = QPushButton("すべて外す")
+        bcn.clicked.connect(lambda: self._check_all_candidates(False))
+        bcg = QPushButton("チェックした候補を除外に追加")
+        bcg.clicked.connect(self.action_add_candidates)
+        for w_ in (bca, bcn, bcg):
+            rc.addWidget(w_)
+        xl.addLayout(rc)
+        xl.addWidget(QLabel("候補は、汚れ（濃くて大きなしみ）と、文字・書き込み（小さな印の集まり）を、目安で探したものです。"
+                            "グラフの線の近くは候補にしません。画像で確かめてから、チェックして追加してください。"))
         self.excl_table = QTableWidget(0, 5)
         self.excl_table.setHorizontalHeaderLabels(["#", "X", "Y", "幅", "高さ"])
         self.excl_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -744,6 +767,7 @@ class MainWindow(QMainWindow):
                   self.a_cancel_pending, self.t_add, self.a_delete, self.t_erase, self.t_origin, self.t_section, self.t_read, self.t_excl, self.a_play, self.a_prev_v, self.a_next_v,
                   self.a_zoom_sel):
             a.setEnabled(has_b)
+        self.t_excl.setEnabled(has_img)            # fencing off stains / writing works before the analysis too
 
     # ---------------------------------------------------------------- tasks
     def run_task(self, title, fn, on_done, on_fail=None):
@@ -1396,6 +1420,7 @@ class MainWindow(QMainWindow):
         self.excl_items = []
         self.range_items = []
         self.sel_set, self.sel_rings, self.edit_preview_items, self.erase_items = [], [], [], []
+        self.cand_items = []
         self.erase_pending = None
         self.ver_range_item = None
         self.pix_item = None
@@ -1431,7 +1456,7 @@ class MainWindow(QMainWindow):
         d = self.band_items.pop(bi, None)
         if not d:
             return
-        for it in [d["path"], *d["inferred"], *d["vertices"], *d["lines"].values(), *d["issues"], *d["pending"],
+        for it in [d["path"], d.get("end"), *d["inferred"], *d["vertices"], *d["lines"].values(), *d["issues"], *d["pending"],
                    *d.get("sections", []), *d.get("arc", []), *d.get("reads", [])]:
             if it is not None and it.scene() is self.scene:
                 self.scene.removeItem(it)
@@ -1481,6 +1506,13 @@ class MainWindow(QMainWindow):
             it.set_editable(self.tool == "select")
             self.scene.addItem(it)
             d["vertices"].append(it)
+        d["end"] = None
+        if len(b.path) and b.traced:
+            ex, ey = b.path[-1]
+            h = EndHandleItem(self, bi, float(ex), float(ey), b.color)
+            h.set_editable(self.tool == "select")
+            self.scene.addItem(h)
+            d["end"] = h
         paper = e.prepared.paper if e.prepared else (0, 0, e.work.shape[1], e.work.shape[0])
         x0, x1 = paper[0], paper[2]
         for kind, y, dashed in (("0線", b.line_zero, False), ("上線", b.line_top, True), ("下線", b.line_bottom, True)):
@@ -1580,7 +1612,7 @@ class MainWindow(QMainWindow):
         self.a_hide_all.setText("図形を表示に戻す" if hide else "図形を全部消す")
         for extra in (self.sel_ring, self.replay_marker, self.section_preview, *self.rev_items, *self.excl_items,
                       self.ver_range_item, *getattr(self, "range_items", []), *self.sel_rings, *self.edit_preview_items,
-                      *self.erase_items):
+                      *self.erase_items, *self.cand_items):
             if extra is not None and extra.scene() is self.scene:
                 extra.setVisible(not hide)
         if self.pix_item is not None:
@@ -1598,6 +1630,8 @@ class MainWindow(QMainWindow):
                 it.setVisible(tr)
             for it in d["vertices"]:
                 it.setVisible(self.cb_vertices.isChecked() and vis_band and zoomed)
+            if d.get("end") is not None:
+                d["end"].setVisible(self.cb_vertices.isChecked() and vis_band)
             for it in d["lines"].values():
                 it.setVisible(self.cb_lines.isChecked() and vis_band)
             for it in d["issues"]:
@@ -1626,6 +1660,8 @@ class MainWindow(QMainWindow):
         for d in self.band_items.values():
             for it in d["vertices"]:
                 it.set_editable(tool == "select")
+            if d.get("end") is not None:
+                d["end"].set_editable(tool == "select")
         hint = {"select": "点の編集: 点をクリックで選択（Ctrl+クリックで追加）／空いた所をドラッグで枠選択／点をドラッグで1点だけ移動／Deleteで削除／測定線は上下にドラッグ",
                 "erase": "トレース線を消したい所を、四角でドラッグして囲む", "add": "追加する頂点（先端）をクリック",
                 "origin": "選択中の段の起点（波形の左端）をクリック", "calib": "1点目、2点目の順にクリック",
@@ -1855,12 +1891,37 @@ class MainWindow(QMainWindow):
         self.v_table.blockSignals(False)
         self.on_vertex_selected(self.sel_band, k)
 
-    def make_line_constraint(self, x, y):
+    def make_line_constraint(self, x, y, band=None):
         """Constraint keeping a dragged vertex on the image's line; falls back to free movement without a graph."""
-        lc = self.engine.line_constraint(x, y)
+        lc = self.engine.line_constraint(x, y, band=band)
         if lc is None:
             self._info("線に沿う移動は、解析後（または編集の準備後）に使えます。いまは自由に動きます")
         return lc
+
+    def show_drag_bridge(self, bridge):
+        """While a point is taken across a gap: show the straight link (dashed orange) from the line's end to the landing point."""
+        if self.bridge_item is not None and self.bridge_item.scene() is self.scene:
+            self.scene.removeItem(self.bridge_item)
+        self.bridge_item = None
+        if bridge is None:
+            return
+        (x0, y0), (x1, y1) = bridge
+        it = make_path_item(polyline_path([(x0, y0), (x1, y1)]), "#ff6d00", 3, dashed=True, z=60)
+        self.scene.addItem(it)
+        self.bridge_item = it
+
+    def on_end_dragged(self, bi, x, y):
+        """The end of a trace was dragged (possibly across a gap): show the result first, then apply."""
+        e = self.engine
+        e.set_pending_extend(bi, x, y)
+        self.dirty = True
+        self.update_edit_tab()
+        if self.auto_retrace:
+            self.apply_pending(bi)
+        else:
+            self._set_state("再追跡", "未適用の修正あり（プレビュー）")
+            self.show_edit_preview(bi)
+            self.update_edit_tab()
 
     def on_vertex_dragged(self, bi, vi, x, y):
         """A vertex was moved by the mouse: ONLY that vertex. The edit is shown as a preview first."""
@@ -2101,6 +2162,99 @@ class MainWindow(QMainWindow):
         self.update_measure_table()
         self._update_review_label()
 
+    # --------------------------------------------- candidates for exclusion
+    def action_find_candidates(self):
+        e = self.engine
+        if e.work is None:
+            return
+        self._set_state("解析", "除外の候補を探索中…")
+
+        def job(cb):
+            return e.suggest_exclusions(cb)
+
+        def done(cands):
+            self.cand = cands
+            self.cand_list.clear()
+            for i, c in enumerate(cands):
+                inv = 1 / e.scale
+                it = QListWidgetItem(f"{i + 1}. {c['kind']}  X{c['x0'] * inv:.0f}-{c['x1'] * inv:.0f}  Y{c['y0'] * inv:.0f}-{c['y1'] * inv:.0f} px")
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(Qt.Unchecked)
+                self.cand_list.addItem(it)
+            self._draw_candidates()
+            self._set_state("解析", f"除外の候補: {len(cands)}件")
+            self.tabs.setCurrentWidget(self.cand_list.parentWidget().parentWidget() if False else self.excl_table.parentWidget())
+            self._info(f"除外の候補が{len(cands)}件見つかりました。画像で確かめて、チェックして追加してください" if cands
+                       else "除外の候補は見つかりませんでした。手動で「除外範囲を囲む」(E)を使えます")
+
+        self.run_task("除外の候補を探しています…", job, done,
+                      lambda m: (self._set_state("解析", "失敗"), self._show_error(m)))
+
+    def _draw_candidates(self):
+        for it in self.cand_items:
+            if it.scene() is self.scene:
+                self.scene.removeItem(it)
+        self.cand_items = []
+        for i, c in enumerate(self.cand):
+            rc = QGraphicsRectItem(c["x0"], c["y0"], c["x1"] - c["x0"], c["y1"] - c["y0"])
+            col = QColor("#ff9800") if c["kind"] == "汚れ" else QColor("#d500f9")
+            pen = QPen(col, 2, Qt.DashLine)
+            pen.setCosmetic(True)
+            rc.setPen(pen)
+            rc.setBrush(QBrush(QColor(col.red(), col.green(), col.blue(), 30)))
+            rc.setZValue(5)
+            rc.setToolTip(f"除外の候補 {i + 1}: {c['kind']}")
+            self.scene.addItem(rc)
+            lbl = QGraphicsSimpleTextItem(f"候補{i + 1}")
+            lbl.setBrush(QBrush(col))
+            lbl.setFlag(QGraphicsSimpleTextItem.ItemIgnoresTransformations, True)
+            lbl.setPos(c["x0"] + 3, c["y0"] + 3)
+            lbl.setZValue(5)
+            self.scene.addItem(lbl)
+            self.cand_items += [rc, lbl]
+        self.apply_visibility()
+
+    def on_candidate_row(self, row):
+        if 0 <= row < len(self.cand):
+            c = self.cand[row]
+            self.view.center_on_point((c["x0"] + c["x1"]) / 2, (c["y0"] + c["y1"]) / 2, zoom=max(0.5, self.view.transform().m11()))
+
+    def _check_all_candidates(self, on):
+        for i in range(self.cand_list.count()):
+            self.cand_list.item(i).setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def action_add_candidates(self):
+        e = self.engine
+        idx = [i for i in range(self.cand_list.count()) if self.cand_list.item(i).checkState() == Qt.Checked]
+        if not idx:
+            self._info("追加する候補にチェックを入れてください")
+            return
+        rects = [self.cand[i] for i in idx]
+        self._set_state("解析", "除外範囲を反映中…")
+
+        def job(cb):
+            return e.add_exclusions(rects, cb)
+
+        def done(affected):
+            self.dirty = True
+            self.cand = [c for i, c in enumerate(self.cand) if i not in idx]
+            self.cand_list.clear()
+            for i, c in enumerate(self.cand):
+                it = QListWidgetItem(f"{i + 1}. {c['kind']}")
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(Qt.Unchecked)
+                self.cand_list.addItem(it)
+            self._draw_candidates()
+            msg = (f"除外範囲を{len(rects)}件追加（引き直した段: {', '.join(e.bands[i].name for i in affected) or 'なし'}）"
+                   if e.bands else f"除外範囲を{len(rects)}件追加しました。「自動解析」すると反映されます")
+            self._set_state("解析", msg)
+            if e.bands:
+                self._build_all_items()
+            self.refresh_panels()
+
+        self.run_task("除外範囲を反映しています…", job, done,
+                      lambda m: (self._set_state("解析", "失敗"), self._show_error(m)))
+
     # ------------------------------------------------------------ exclusions
     def add_exclusion_rect(self, x0, y0, x1, y1):
         e = self.engine
@@ -2111,7 +2265,8 @@ class MainWindow(QMainWindow):
 
         def done(affected):
             self.dirty = True
-            self._set_state("解析", f"除外範囲を追加（引き直した段: {', '.join(e.bands[i].name for i in affected) or 'なし'}）")
+            self._set_state("解析", f"除外範囲を追加（引き直した段: {', '.join(e.bands[i].name for i in affected) or 'なし'}）" if e.bands
+                            else "除外範囲を追加しました。「自動解析」すると反映されます")
             self._build_all_items()
             self.refresh_panels()
             self.tabs.setCurrentWidget(self.excl_table.parentWidget())
@@ -2515,7 +2670,7 @@ class MainWindow(QMainWindow):
 
     def _section_drag_preview(self, a, b):
         bd = self.current_band()
-        if bd is None:
+        if bd is None and self.tool != "excl":
             return
         if self.tool == "select":
             y0, y1 = a.y(), b.y()

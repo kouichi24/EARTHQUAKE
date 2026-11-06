@@ -23,6 +23,7 @@ class Params:
     gap_evidence_thr: float = 0.85     # background-normalised gray below this counts as ink evidence (paper = 1.0)
     gap_evidence_min: float = 0.6      # share of the gap that must show evidence
     virtual_max_gap: int = 120         # longest estimated link between line ends [px]
+    drag_jump_px: int = 160            # a dragged point may jump across a gap of up to this length (px)
     jump_max_gap: int = 300            # longest estimated jump to a further fragment [px]
     invert: bool = False               # light line on dark paper (e.g. smoked paper): invert before analysis
     drop_marks: bool = False           # remove time ticks / small black marks near the reference lines

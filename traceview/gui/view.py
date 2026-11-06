@@ -12,6 +12,7 @@ class ImageView(QGraphicsView):
     sceneClicked = Signal(QPointF)
     cursorMoved = Signal(QPointF)
     zoomChanged = Signal()
+    applyRequested = Signal()
     dragMoved = Signal(QPointF, QPointF)
     dragFinished = Signal(QPointF, QPointF)
 
@@ -77,6 +78,12 @@ class ImageView(QGraphicsView):
         if self.click_tool and was_click:
             self.sceneClicked.emit(self.mapToScene(ev.position().toPoint()))
         self.setDragMode(QGraphicsView.ScrollHandDrag)
+
+    def keyPressEvent(self, ev):
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter):       # Enter in the image area applies the pending edit
+            self.applyRequested.emit()
+            return
+        super().keyPressEvent(ev)
 
     def mouseMoveEvent(self, ev):
         self.cursorMoved.emit(self.mapToScene(ev.position().toPoint()))
@@ -158,13 +165,14 @@ class VertexItem(QGraphicsEllipseItem):
         additive = bool(ev.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
         self.win.on_vertex_selected(self.band_i, self.vi, from_canvas=True, additive=additive)
         if (self.flags() & QGraphicsEllipseItem.ItemIsMovable) and self.win.follow_line:
-            self._lc = self.win.make_line_constraint(self.pos().x(), self.pos().y())
+            self._lc = self.win.make_line_constraint(self.pos().x(), self.pos().y(), self.band_i)
         self._dragging = True
         super().mousePressEvent(ev)
 
     def itemChange(self, change, value):
         if change == QGraphicsEllipseItem.ItemPositionChange and self._dragging and self._lc is not None:
             sx, sy = self._lc.snap(value.x(), value.y())
+            self.win.show_drag_bridge(self._lc.last_bridge)        # dashed link while the point is taken across a gap
             return QPointF(sx, sy)
         return super().itemChange(change, value)
 
@@ -173,8 +181,35 @@ class VertexItem(QGraphicsEllipseItem):
         super().mouseReleaseEvent(ev)
         self._dragging = False
         self._lc = None
+        self.win.show_drag_bridge(None)
         if moved:
             self.win.on_vertex_dragged(self.band_i, self.vi, self.pos().x(), self.pos().y())
+
+
+class EndHandleItem(VertexItem):
+    """Handle at the end of a band's trace: dragging it takes the end across a gap to the line beyond and goes on."""
+
+    def __init__(self, win, band_i, x, y, color):
+        super().__init__(win, band_i, -1, x, y, color, r=7)
+        self.setBrush(QBrush(QColor("white")))
+        self.setPen(QPen(QColor(color), 3))
+        self.setToolTip("トレースの末端。ドラッグして、途切れの先にある線まで連れていくと、そこから先を追跡します")
+        self.setZValue(32)
+
+    def mousePressEvent(self, ev):
+        if (self.flags() & QGraphicsEllipseItem.ItemIsMovable) and self.win.follow_line:
+            self._lc = self.win.make_line_constraint(self.pos().x(), self.pos().y(), self.band_i)
+        self._dragging = True
+        QGraphicsEllipseItem.mousePressEvent(self, ev)
+
+    def mouseReleaseEvent(self, ev):
+        moved = self.flags() & QGraphicsEllipseItem.ItemIsMovable
+        QGraphicsEllipseItem.mouseReleaseEvent(self, ev)
+        self._dragging = False
+        self._lc = None
+        self.win.show_drag_bridge(None)
+        if moved:
+            self.win.on_end_dragged(self.band_i, self.pos().x(), self.pos().y())
 
 
 class LineItem(QGraphicsLineItem):

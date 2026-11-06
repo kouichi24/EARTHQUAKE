@@ -19,11 +19,16 @@ from .vertices import Vertex, extract_vertices
 
 
 class LineConstraint:
-    """Keeps a dragged point ON the image's line: it can only sit on skeleton pixels that are reachable from the
-    start pixel along the line within `limit` px, so it never jumps to a neighbouring line that is not connected."""
+    """Keeps a dragged point ON the image's line.
 
-    def __init__(self, skel, start_xy, limit=150):
+    The point can sit on skeleton pixels reachable from the start pixel along the line within `limit` px, so it never
+    jumps to a neighbouring line that is not connected. In addition it may jump ACROSS A GAP: where the line ends and
+    another piece of line lies on its extension (in the direction the line was heading, within `jump` px), the point
+    can be taken over to that piece. snap() then sets `last_bridge` = (end of the line, landing point)."""
+
+    def __init__(self, skel, start_xy, limit=150, jump=160, cone_cos=0.7, y_range=None):
         from skimage.graph import MCP_Geometric
+        import cv2 as _cv2
         h, w = skel.shape
         x, y = int(round(start_xy[0])), int(round(start_xy[1]))
         x0, x1 = max(0, x - limit), min(w, x + limit + 1)
@@ -31,6 +36,8 @@ class LineConstraint:
         sub = skel[y0:y1, x0:x1]
         ys, xs = np.nonzero(sub)
         self.ok = False
+        self.last_bridge = None
+        self.jump_tree = None
         if len(xs) == 0:
             return
         d = np.hypot(xs + x0 - x, ys + y0 - y)
@@ -39,18 +46,72 @@ class LineConstraint:
             return
         costs = np.where(sub, 1.0, np.inf)
         cum, _tb = MCP_Geometric(costs, fully_connected=True).find_costs([(int(ys[j]), int(xs[j]))])
-        ry, rx = np.nonzero(np.isfinite(cum) & (cum <= limit))
+        reach = np.isfinite(cum) & (cum <= limit)
+        ry, rx = np.nonzero(reach)
         self.pts = np.stack([rx + x0, ry + y0], 1).astype(float)
         self.tree = cKDTree(self.pts)
         self.start = (int(xs[j] + x0), int(ys[j] + y0))
         self.ok = len(self.pts) > 0
+        if not self.ok or jump <= 0:
+            return
+        # ---- ends of the reachable piece and what lies on their extension
+        # ends of the LINE (one neighbour in the whole skeleton, so the edge of the window is not an end),
+        # and not the points where the reach simply stops (the line goes on there)
+        pad = skel[max(0, y0 - 1):y1 + 1, max(0, x0 - 1):x1 + 1].astype(np.uint8)
+        nbp = _cv2.filter2D(pad, -1, np.ones((3, 3), np.float32), borderType=_cv2.BORDER_CONSTANT) - pad
+        oy_, ox_ = y0 - max(0, y0 - 1), x0 - max(0, x0 - 1)
+        nb = nbp[oy_:oy_ + sub.shape[0], ox_:ox_ + sub.shape[1]]
+        end_y, end_x = np.nonzero(reach & sub & (nb == 1) & (cum <= limit - 4))
+        if len(end_x) == 0:
+            return
+        R = max(jump, limit)                           # (the window must contain the reach window)
+        X0, X1 = max(0, x - R), min(w, x + R + 1)
+        Y0, Y1 = max(0, y - R), min(h, y + R + 1)
+        sub2 = skel[Y0:Y1, X0:X1]
+        reach2 = np.zeros(sub2.shape, np.uint8)
+        reach2[y0 - Y0:y1 - Y0, x0 - X0:x1 - X0] = reach.astype(np.uint8)
+        far = _cv2.distanceTransform((reach2 == 0).astype(np.uint8), _cv2.DIST_L2, 3) > 6      # not the same piece
+        cy, cx = np.nonzero(sub2 & far)
+        if len(cx) == 0:
+            return
+        cpts = np.stack([cx + X0, cy + Y0], 1).astype(float)
+        if y_range is not None:                       # only lines inside this band's own territory
+            cpts = cpts[(cpts[:, 1] >= y_range[0]) & (cpts[:, 1] <= y_range[1])]
+            if len(cpts) == 0:
+                return
+        keep_pts, keep_end = [], []
+        for ex, ey in zip(end_x + x0, end_y + y0):
+            near = self.pts[np.hypot(self.pts[:, 0] - ex, self.pts[:, 1] - ey) <= 16]
+            hd = np.array([ex, ey], float) - near.mean(axis=0)
+            nh = np.hypot(*hd)
+            if nh < 1e-6:
+                continue
+            hd /= nh
+            v = cpts - np.array([ex, ey], float)
+            dist = np.hypot(v[:, 0], v[:, 1])
+            ok = (dist >= 4) & (dist <= jump) & ((v @ hd) / np.maximum(dist, 1e-6) >= cone_cos)
+            if ok.any():
+                keep_pts.append(cpts[ok])
+                keep_end.append(np.tile([ex, ey], (int(ok.sum()), 1)))
+        if keep_pts:
+            self.jump_pts = np.concatenate(keep_pts)
+            self.jump_end = np.concatenate(keep_end)
+            self.jump_tree = cKDTree(self.jump_pts)
 
     def snap(self, x, y):
-        """Nearest allowed point on the line to (x, y)."""
+        """Nearest allowed point to (x, y): on the connected line, or on a line beyond a gap on its extension."""
+        self.last_bridge = None
         if not self.ok:
             return x, y
-        _d, k = self.tree.query([x, y])
-        return float(self.pts[k][0]), float(self.pts[k][1])
+        d1, k1 = self.tree.query([x, y])
+        p1 = (float(self.pts[k1][0]), float(self.pts[k1][1]))
+        if self.jump_tree is not None:
+            d2, k2 = self.jump_tree.query([x, y])
+            if d2 < 30 and d2 < d1 - 8:             # the mouse is clearly nearer to the line beyond the gap
+                p2 = (float(self.jump_pts[k2][0]), float(self.jump_pts[k2][1]))
+                self.last_bridge = ((float(self.jump_end[k2][0]), float(self.jump_end[k2][1])), p2)
+                return p2
+        return p1
 
 
 class EngineError(Exception):
@@ -713,16 +774,134 @@ class Engine:
 
     def add_exclusion(self, x0, y0, x1, y1, progress=_noop):
         """Ignore everything inside the rectangle (e.g. letters touching the trace) and re-trace the bands
-        whose line ran through it. Other bands and their edits are not touched."""
+        whose line ran through it. Other bands and their edits are not touched. Before the first analysis the
+        rectangle is just remembered and applied when the analysis runs."""
         rect = dict(x0=float(min(x0, x1)), y0=float(min(y0, y1)), x1=float(max(x0, x1)), y1=float(max(y0, y1)))
-        if rect["x1"] - rect["x0"] < 4 or rect["y1"] - rect["y0"] < 4:
-            raise EngineError("除外範囲が小さすぎます")
-        affected = self._bands_touching(rect)
-        self.exclusions.append(rect)
+        return self.add_exclusions([rect], progress)
+
+    def add_exclusions(self, rects, progress=_noop):
+        rects = [dict(x0=float(min(r["x0"], r["x1"])), y0=float(min(r["y0"], r["y1"])),
+                      x1=float(max(r["x0"], r["x1"])), y1=float(max(r["y0"], r["y1"]))) for r in rects]
+        for r in rects:
+            if r["x1"] - r["x0"] < 4 or r["y1"] - r["y0"] < 4:
+                raise EngineError("除外範囲が小さすぎます")
+        if not self.bands:                       # not analysed yet: remember only, the analysis applies them
+            self.exclusions += rects
+            self.graph = None
+            self.prepared = None
+            return []
+        affected = sorted({i for r in rects for i in self._bands_touching(r)})
+        self.exclusions += rects
         self.graph = None
         self.ensure_graph(progress)
         self._retrace_bands(affected, progress)
         return affected
+
+    def suggest_exclusions(self, progress=_noop):
+        """Find places that are probably NOT part of the graph: stains and writing/letters outside the bands.
+
+        Heuristics, only suggestions: (1) dense dark blobs (stains), (2) clusters of small marks (letters, notes).
+        Anything near a band's baseline is never suggested (that is where the waveform is). Areas that are already
+        excluded are not suggested again."""
+        progress("除外の候補を探しています", 0.2)
+        if self.prepared is None:
+            self.prepared = prepare(self.work, self.params)
+            self._apply_exclusions()
+        ink = self.prepared.ink
+        H, W = ink.shape
+        origins = self.detect_origins()
+        ys = [o[1] for o in origins]
+        gap = float(np.median(np.diff(ys))) if len(ys) >= 2 else 0.2 * H
+        zones = [(oy - 0.3 * gap, oy + 0.3 * gap) for oy in ys]
+        out = []
+        # ink that is connected to a band's own territory belongs to the graph, e.g. a tall spike that sticks out of it
+        n_all, lab_all = cv2.connectedComponents(ink.astype(np.uint8), connectivity=8)
+        zone_labels = set()
+        for zt, zb in zones:
+            zone_labels |= set(np.unique(lab_all[max(0, int(zt)):int(zb), :]).tolist())
+        zone_labels.discard(0)
+        zl = np.zeros(n_all + 1, bool)
+        for k in zone_labels:
+            zl[k] = True
+
+        def belongs_to_graph(rect):
+            x0, y0, x1, y1 = rect
+            sub = lab_all[y0:y1, x0:x1]
+            nz = sub > 0
+            if not nz.any():
+                return False
+            frac = float(zl[sub[nz]].mean())
+            dist = min((max(0, zt - y1, y0 - zb) for zt, zb in zones), default=1e9)   # 0 when they overlap in y
+            return dist <= 25 and frac >= 0.4
+
+        def clip(rect):
+            """Cut away the parts of a rectangle that lie in a band's own territory."""
+            x0, y0, x1, y1 = rect
+            for zt, zb in zones:
+                if y1 > zt and y0 < zb:
+                    up, down = (zt - y0), (y1 - zb)
+                    if up >= down and up > 0:
+                        y1 = zt
+                    elif down > 0:
+                        y0 = zb
+                    else:
+                        return None
+            if (x1 - x0) > 8 and (y1 - y0) > 8:
+                return int(x0), int(y0), int(x1), int(y1)
+            return None
+
+        # (1) stains: big dense dark areas
+        dens = cv2.boxFilter(ink.astype(np.float32), -1, (41, 41))
+        mask = (dens > 0.28).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)))
+        n, lab, st, _c = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        stains = []
+        for i in range(1, n):
+            x, y, w, h, area = st[i]
+            if area < 4000 or int(ink[y:y + h, x:x + w].sum()) < 2500:
+                continue
+            r = clip((x, y, x + w, y + h))
+            ink_n = int(ink[r[1]:r[3], r[0]:r[2]].sum()) if r is not None else 0
+            if r is not None and (r[2] - r[0]) * (r[3] - r[1]) >= 3000 and ink_n >= 1500 \
+                    and ink_n / float((r[2] - r[0]) * (r[3] - r[1])) >= 0.2:       # a stain is dense; a spike sticking out is not
+                stains.append(r)
+                out.append(dict(x0=float(r[0]), y0=float(r[1]), x1=float(r[2]), y1=float(r[3]), kind="汚れ",
+                                n=int(ink[r[1]:r[3], r[0]:r[2]].sum())))
+        # (2) writing: clusters of small separate marks away from the bands and from the stains
+        progress("文字・書き込みを探しています", 0.6)
+        n, lab, st, cen = cv2.connectedComponentsWithStats(ink.astype(np.uint8), connectivity=8)
+        canvas = np.zeros(ink.shape, np.uint8)
+        sizes = {}
+        for i in range(1, n):
+            x, y, w, h, area = st[i]
+            if not (20 <= area <= 2500) or max(w, h) > 120:
+                continue
+            cy = y + h / 2
+            if any(zt <= cy <= zb for zt, zb in zones):
+                continue
+            if any(sx0 <= x + w / 2 <= sx1 and sy0 <= cy <= sy1 for sx0, sy0, sx1, sy1 in stains):
+                continue
+            cv2.rectangle(canvas, (max(0, x - 30), max(0, y - 30)), (min(W - 1, x + w + 30), min(H - 1, y + h + 30)), 1, -1)
+            sizes[i] = (x, y, w, h)
+        m2, lab2, st2, _c2 = cv2.connectedComponentsWithStats(canvas, connectivity=8)
+        for j in range(1, m2):
+            members = [v for i, v in sizes.items() if lab2[v[1] + v[3] // 2, v[0] + v[2] // 2] == j]
+            if len(members) < 3:
+                continue
+            xs0 = min(v[0] for v in members) - 6
+            ys0 = min(v[1] for v in members) - 6
+            xs1 = max(v[0] + v[2] for v in members) + 6
+            ys1 = max(v[1] + v[3] for v in members) + 6
+            r = clip((max(0, xs0), max(0, ys0), min(W, xs1), min(H, ys1)))
+            if r is not None and not belongs_to_graph(r):
+                out.append(dict(x0=float(r[0]), y0=float(r[1]), x1=float(r[2]), y1=float(r[3]), kind="文字・書き込み",
+                                n=len(members)))
+        # the paper's edge and the rulers are outside the paper box already; keep suggestions inside it
+        px0, py0, px1, py1 = self.prepared.paper
+        out = [o for o in out if o["x0"] >= px0 - 5 and o["x1"] <= px1 + 5 and o["y0"] >= py0 - 5 and o["y1"] <= py1 + 5]
+        out.sort(key=lambda o: -(o["x1"] - o["x0"]) * (o["y1"] - o["y0"]))
+        progress("完了", 1.0)
+        return out
 
     def remove_exclusion(self, k, progress=_noop):
         if not (0 <= k < len(self.exclusions)):
@@ -739,11 +918,17 @@ class Engine:
         self._retrace_bands(affected, progress)
         return affected
 
-    def line_constraint(self, x, y, limit=150):
-        """Constraint that keeps a dragged vertex on the image's line (None while the graph is not built)."""
+    def line_constraint(self, x, y, limit=150, jump=None, band=None):
+        """Constraint that keeps a dragged vertex on the image's line, with a jump across gaps (None while the graph is not built)."""
         if self.graph is None:
             return None
-        lc = LineConstraint(self.graph.skel, (x, y), limit)
+        y_range = None
+        if band is not None and 0 <= band < len(self.bands):
+            origins = self._origin_list()
+            if len(origins) >= 2 or band in self.band_ranges:
+                corr, _z = self._zone(band, origins)
+                y_range = (corr[2], corr[3])
+        lc = LineConstraint(self.graph.skel, (x, y), limit, self.params.drag_jump_px if jump is None else jump, y_range=y_range)
         return lc if lc.ok else None
 
     # ---------------------------------------------------------------- routing
@@ -766,6 +951,46 @@ class Engine:
             return None
         r = np.array([(x + x0, y + y0) for y, x in idx], np.int32)
         return r
+
+    def _route_bridged(self, a, b, max_gap=None, pad=60):
+        """Route a -> b along the skeleton; if they lie on pieces of line that are not connected, cross the gap with
+        a straight bridge between the two pieces' closest pixels. Returns (route, bridge) where bridge is None or
+        the index pair (i0, i1) of the bridge inside the route, or (None, None) if it cannot be done."""
+        from skimage.graph import MCP_Geometric
+        max_gap = max_gap or (self.params.drag_jump_px + 40)
+        r = self._route(a, b)
+        if r is not None:
+            return r, None
+        g = self.graph
+        h, w = g.skel.shape
+        xa, ya, xb, yb = int(a[0]), int(a[1]), int(b[0]), int(b[1])
+        x0, x1 = max(0, min(xa, xb) - pad - max_gap // 2), min(w, max(xa, xb) + pad + max_gap // 2 + 1)
+        y0, y1 = max(0, min(ya, yb) - pad - max_gap // 2), min(h, max(ya, yb) + pad + max_gap // 2 + 1)
+        sub = g.skel[y0:y1, x0:x1]
+        if not (sub[ya - y0, xa - x0] and sub[yb - y0, xb - x0]):
+            return None, None
+        costs = np.where(sub, 1.0, np.inf)
+        ca, _t = MCP_Geometric(costs, fully_connected=True).find_costs([(ya - y0, xa - x0)])
+        cb, _t = MCP_Geometric(costs, fully_connected=True).find_costs([(yb - y0, xb - x0)])
+        ay, ax = np.nonzero(np.isfinite(ca))
+        by_, bx = np.nonzero(np.isfinite(cb))
+        if len(ax) == 0 or len(bx) == 0:
+            return None, None
+        pa = np.stack([ax + x0, ay + y0], 1).astype(float)
+        pb = np.stack([bx + x0, by_ + y0], 1).astype(float)
+        d, k = cKDTree(pb).query(pa)
+        i = int(np.argmin(d))
+        if d[i] > max_gap:
+            return None, None
+        ra, rb = pa[i].astype(int), pb[k[i]].astype(int)
+        r1 = self._route(tuple(a), tuple(ra))
+        r2 = self._route(tuple(rb), tuple(b))
+        if r1 is None or r2 is None:
+            return None, None
+        n = int(max(2, np.hypot(*(rb - ra))))
+        line = np.stack([np.round(np.linspace(ra[0], rb[0], n)), np.round(np.linspace(ra[1], rb[1], n))], 1).astype(np.int32)
+        route = np.concatenate([r1, line[1:], r2[1:]]).astype(np.int32)
+        return route, (len(r1) - 1, len(r1) - 1 + len(line) - 1)
 
     def _snap(self, x, y):
         """Nearest skeleton pixel (ED-04). Returns ((x, y), distance) or (None, None)."""
@@ -819,6 +1044,11 @@ class Engine:
             msgs.append(msg)
         for p in adds:
             ok, msg = self._apply_add(work_b, p)
+            if not ok:
+                raise EngineError(msg)
+            msgs.append(msg)
+        for p in [q for q in b.pending if q["type"] == "extend"]:
+            ok, msg = self._apply_extend(work_b, p)
             if not ok:
                 raise EngineError(msg)
             msgs.append(msg)
@@ -890,7 +1120,7 @@ class Engine:
         a_snap, _ = self._snap(a[0], a[1])
         if a_snap is None:
             return False, "再計算の開始位置が画像の線上にありません"
-        route = self._route(a_snap, P)
+        route, bridge = self._route_bridged(a_snap, P)
         if route is None:
             return False, "指定位置へ至る線が見つかりません（途切れている可能性があります）。修正前の結果を保持します"
         g = self.graph
@@ -915,14 +1145,17 @@ class Engine:
         head = np.concatenate([prefix, route[1:], partial]) if len(partial) else np.concatenate([prefix, route[1:]])
         newpath = np.concatenate([head, tail]).astype(np.int32) if len(tail) else head
         shift = len(head)
-        inf2 = [(x + shift, y + shift) for x, y in inf]
+        inf2 = [(x, y) for x, y in b.inferred if y <= start_idx] + [(x + shift, y + shift) for x, y in inf]
+        if bridge is not None:
+            inf2.append((len(prefix) - 1 + bridge[0], len(prefix) - 1 + bridge[1]))      # the gap crossed by hand
         prev_manual = [mp for mp in b.manual_points if np.hypot(mp["x"] - p["ox"], mp["y"] - p["oy"]) > 1]
         prev_manual.append(dict(x=float(P[0]), y=float(P[1]), kind="moved"))
         b.manual_points = prev_manual
         rev2 = [r + shift for r in rev]
         self._finish_band(b, newpath, rev2, [(a_ + shift, x_, y_) for a_, x_, y_ in amb], inf2, end_x)
         offtxt = f"（画像の線へ{off:.1f}px補正）" if off and off > 0.5 else ""
-        return True, f"頂点を移動し、そこから先を再追跡しました{offtxt}"
+        bridged = "（途切れの部分は、手で線をつなぎました）" if bridge is not None else ""
+        return True, f"頂点を移動し、そこから先を再追跡しました{bridged}{offtxt}"
 
     def _apply_move_local(self, b, p, k, P, off):
         """Move one vertex and re-route ONLY the stretch between the vertex before and the vertex after it.
@@ -942,8 +1175,8 @@ class Engine:
         n_snap, _ = self._snap(path[end_idx][0], path[end_idx][1])
         if a_snap is None or n_snap is None:
             return False, "前後の点が画像の線の上にありません"
-        r1 = self._route(a_snap, P)
-        r2 = self._route(P, n_snap)
+        r1, br1 = self._route_bridged(a_snap, P)
+        r2, br2 = self._route_bridged(P, n_snap)
         if r1 is None or r2 is None:
             return False, "指定位置と前後の点を結ぶ線が見つかりません（途切れている可能性があります）。修正前の結果を保持します"
         seg = np.concatenate([r1, r2[1:]]).astype(np.int32)
@@ -955,12 +1188,18 @@ class Engine:
                 inf.append((a_, c_))
             elif a_ > end_idx:
                 inf.append((a_ + shift, c_ + shift))
+        if br1 is not None:
+            inf.append((start_idx + br1[0], start_idx + br1[1]))
+        if br2 is not None:
+            off2 = start_idx + len(r1) - 1
+            inf.append((off2 + br2[0], off2 + br2[1]))
         prev_manual = [mp for mp in b.manual_points if np.hypot(mp["x"] - p["ox"], mp["y"] - p["oy"]) > 1]
         prev_manual.append(dict(x=float(P[0]), y=float(P[1]), kind="moved"))
         b.manual_points = prev_manual
         self._finish_band(b, newpath, reversals_from_path(newpath), [], inf, b.end_x)
         offtxt = f"（画像の線へ{off:.1f}px補正）" if off and off > 0.5 else ""
-        return True, f"頂点を移動しました。前後の頂点の間だけを引き直しました（他の線は変えていません）{offtxt}"
+        bridged = "（途切れの部分は、手で線をつなぎました）" if (br1 is not None or br2 is not None) else ""
+        return True, f"頂点を移動しました。前後の頂点の間だけを引き直しました（他の線は変えていません）{bridged}{offtxt}"
 
     def _continue_from(self, P, d):
         """Graph node / edge / pixels to continue with after arriving at skeleton pixel P heading d."""
@@ -994,6 +1233,56 @@ class Engine:
         else:
             far, partial = e.a, e.pix[:i][::-1]
         return far, eid, np.asarray(partial, np.int32).reshape(-1, 2)
+
+    def set_pending_extend(self, bi, x, y):
+        """Take the end of the trace to (x, y) - e.g. across a gap to the line on its extension - and go on from there."""
+        b = self.bands[bi]
+        b.pending = [q for q in b.pending if q["type"] != "extend"]
+        b.pending.append(dict(type="extend", x=float(x), y=float(y)))
+
+    def _apply_extend(self, b, p):
+        P, off = self._snap(p["x"], p["y"])
+        if P is None:
+            return False, f"指定位置の近く({self.params.snap_radius}px以内)に画像の線がありません"
+        path = b.path
+        if len(path) == 0:
+            return False, "トレース線がありません"
+        a_snap, _ = self._snap(path[-1][0], path[-1][1])
+        if a_snap is None:
+            return False, "トレースの末端が画像の線の上にありません"
+        route, bridge = self._route_bridged(a_snap, P)
+        if route is None:
+            return False, "その位置へ至る線が見つかりません（離れすぎているか、線の延長上にありません）"
+        d = (route[-1] - route[max(0, len(route) - 12)]).astype(float)
+        nd = np.hypot(*d)
+        d = d / nd if nd else np.array([1.0, 0.0])
+        node, edge, partial = self._continue_from(P, d)
+        g = self.graph
+        origins = self._origin_list()
+        corr, zone = self._zone(b.index, origins)
+        blocked = set()
+        for part in (path, route):
+            ids = np.unique(g.pix_edge[part[:, 1], part[:, 0]])
+            blocked |= {int(e) for e in ids if e >= 0}
+        tail = np.zeros((0, 2), np.int32)
+        rev, amb, inf, end_x = [], [], [], float(max(path[:, 0].max(), P[0]))
+        if node is not None:
+            blocked.discard(edge)
+            self._tracing_band = b.index
+            tail, rev, amb, inf, end_x = self._trace_from(node, edge, corr, zone, blocked=blocked, oy=b.origin[1])
+        L = len(path)
+        head = np.concatenate([path, route[1:]] + ([partial] if len(partial) else []))
+        newpath = np.concatenate([head, tail]).astype(np.int32) if len(tail) else head.astype(np.int32)
+        shift = len(head)
+        inf2 = list(b.inferred) + [(x + shift, y + shift) for x, y in inf]
+        if bridge is not None:
+            inf2.append((L - 1 + bridge[0], L - 1 + bridge[1]))
+        end_x = max(end_x, float(newpath[:, 0].max()))
+        b.manual_points.append(dict(x=float(P[0]), y=float(P[1]), kind="added"))
+        from .verify import reversals_from_path
+        self._finish_band(b, newpath, reversals_from_path(newpath), [], inf2, end_x)
+        bridged = "（途切れを、手で線をつないで越えました）" if bridge is not None else ""
+        return True, f"トレースの末端を指定の位置まで延ばし、そこから先を追跡しました{bridged}"
 
     def _apply_add(self, b, p):
         P, off = self._snap(p["x"], p["y"])
