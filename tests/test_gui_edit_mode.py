@@ -166,3 +166,61 @@ def test_end_handle_takes_the_trace_across_a_gap_with_preview_and_enter(tmp_path
     w.view.applyRequested.emit()                                          # Enter in the image area
     assert not b.pending and b.complete and b.inferred
     w.close()
+
+
+def test_other_bands_are_locked_while_one_band_is_edited(win):
+    from PySide6.QtCore import Qt as _Qt
+    assert win.lock_others and win.cb_lock.isChecked()
+    win.sel_band = 0
+    win.band_list.setCurrentRow(0)
+    for bi in (0, 1, 2):
+        d = win.band_items[bi]
+        active = bi == 0
+        for it in d["vertices"][:20] + [d["end"]]:
+            assert (it.acceptedMouseButtons() != _Qt.NoButton) == active           # the other bands ignore the mouse
+            assert bool(it.flags() & QGraphicsItem.ItemIsMovable) == active
+            assert (it.opacity() == 1.0) == active                                  # ... and are shown dimmed
+        for ln in d["lines"].values():
+            assert bool(ln.flags() & QGraphicsItem.ItemIsMovable) == active
+    assert "ロック中" in win.lock_label.text() and "上段" in win.lock_label.text()
+    # a click on a locked band's vertex does nothing
+    win.on_vertex_selected(1, 5, from_canvas=True)
+    assert win.sel_band == 0 and (1, 5) not in win.sel_set
+    # choosing another band moves the lock to it
+    win.band_list.setCurrentRow(1)
+    assert win.sel_band == 1
+    assert win.band_items[1]["vertices"][0].acceptedMouseButtons() != _Qt.NoButton
+    assert win.band_items[0]["vertices"][0].acceptedMouseButtons() == _Qt.NoButton
+    # unlocking makes every band editable again
+    win.cb_lock.setChecked(False)
+    assert all(it.acceptedMouseButtons() != _Qt.NoButton for bi in (0, 1, 2) for it in win.band_items[bi]["vertices"][:20])
+    assert "ロックなし" in win.lock_label.text() or "編集できます" in win.lock_label.text()
+    win.cb_lock.setChecked(True)
+    win.band_list.setCurrentRow(0)
+
+
+def test_editing_the_red_band_does_not_change_the_other_bands(win):
+    win.band_list.setCurrentRow(0)
+    others = [(win.engine.bands[i].path.copy(), len(win.engine.bands[i].vertices)) for i in (1, 2)]
+    b = win.engine.bands[0]
+    k = len(b.vertices) // 2
+    v = b.vertices[k]
+    win.on_vertex_dragged(0, k, v.x + 3, v.y)
+    win.action_apply()
+    win.delete_after = None
+    win.sel_set = [(0, 4)]
+    win.sel_vertex = 4
+    win.action_delete_selected()
+    win.set_pending_erase(900, 0, 1000, 400)
+    win.action_apply_erase()
+    for (path, nv), i in zip(others, (1, 2)):
+        assert np.array_equal(win.engine.bands[i].path, path) and len(win.engine.bands[i].vertices) == nv
+
+
+def test_exclusion_over_two_bands_re_traces_only_the_edited_one(win):
+    from tests.synth import BASELINES
+    win.band_list.setCurrentRow(0)
+    before1 = win.engine.bands[1].path.copy()
+    win.add_exclusion_rect(700, BASELINES[0] - 20, 760, BASELINES[1] + 20)     # holds pieces of the red AND the green line
+    assert np.array_equal(win.engine.bands[1].path, before1)                    # green stays as it was
+    assert any(i.kind == "exclusion_pending" for i in win.engine.bands[1].issues)

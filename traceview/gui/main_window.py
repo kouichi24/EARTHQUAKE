@@ -28,7 +28,7 @@ from .view import EndHandleItem, ImageView, LineItem, PyramidItem, VertexItem, m
 
 ISSUE_LABEL = {"ambiguous": "所属の曖昧さ", "untracked_end": "末端の未追跡", "inferred": "推定接続",
                "excursion": "他の段への逸脱", "no_origin": "起点未検出", "retrace_failed": "再追跡の失敗",
-               "verify": "検証", "not_traced": "未解析", "shared_line": "確認済みの段と線が重なる"}
+               "verify": "検証", "exclusion_pending": "除外範囲（この段は引き直していない）", "erased": "手動で消した区間", "not_traced": "未解析", "shared_line": "確認済みの段と線が重なる"}
 FILE_FILTER = "波形画像 (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp);;すべてのファイル (*)"
 
 
@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.auto_retrace = False
         self.follow_line = True
+        self.lock_others = True
         self.replay_idx = 0
         self.replay_marker = None
         self.replay_timer = QTimer(self)
@@ -203,6 +204,10 @@ class MainWindow(QMainWindow):
                                   tip="選択中の段を直したあと、それより下の段を、直した線を避けて引き直します")
         self.a_apply = self._act("再追跡を適用", self.action_apply, "Ctrl+Return")
         self.a_cancel_pending = self._act("修正を取り消す", self.action_cancel_pending, "Esc")
+        self.cb_lock = QCheckBox("編集中の段だけ動かす")
+        self.cb_lock.setChecked(True)
+        self.cb_lock.setToolTip("オン（既定）: いま選んでいる段（例：赤い上段）の点・線だけを編集できます。\nほかの段は薄く表示され、クリックもドラッグもできません（編集が、ほかの段の線に影響しません）")
+        self.cb_lock.toggled.connect(self._lock_toggled)
         self.cb_follow = QCheckBox("線に沿って動かす")
         self.cb_follow.setChecked(True)
         self.cb_follow.setToolTip("オン: 頂点をドラッグすると、画像の線の上だけを動く（つながっていない別の線へは飛ばない）。\nオフ: 自由に動かせる")
@@ -216,6 +221,7 @@ class MainWindow(QMainWindow):
         tb2.addAction(self.a_verify)
         tb2.addAction(self.a_apply)
         tb2.addAction(self.a_cancel_pending)
+        tb2.addWidget(self.cb_lock)
         tb2.addWidget(self.cb_follow)
         tb2.addWidget(self.cb_auto)
         tb2.addSeparator()
@@ -300,6 +306,10 @@ class MainWindow(QMainWindow):
         ew = QWidget()
         el = QVBoxLayout(ew)
         el.addWidget(QLabel("【点の編集モード】点をクリックして選び、ドラッグで1点だけ動かします。動かすと、まずプレビューを表示し、確認してから適用します。"))
+        self.lock_label = QLabel("")
+        self.lock_label.setTextFormat(Qt.RichText)
+        self.lock_label.setWordWrap(True)
+        el.addWidget(self.lock_label)
         self.sel_title = QLabel("選択中: 0点")
         self.sel_title.setStyleSheet("font-weight:bold")
         el.addWidget(self.sel_title)
@@ -1645,6 +1655,7 @@ class MainWindow(QMainWindow):
                 it.setVisible(self.cb_arc.isChecked() and tr)
             for it in d.get("reads", []):
                 it.setVisible(vis_band)
+        self._apply_lock_state()
 
     def set_tool(self, tool):
         self.tool = tool
@@ -1662,6 +1673,7 @@ class MainWindow(QMainWindow):
                 it.set_editable(tool == "select")
             if d.get("end") is not None:
                 d["end"].set_editable(tool == "select")
+        self._apply_lock_state()
         hint = {"select": "点の編集: 点をクリックで選択（Ctrl+クリックで追加）／空いた所をドラッグで枠選択／点をドラッグで1点だけ移動／Deleteで削除／測定線は上下にドラッグ",
                 "erase": "トレース線を消したい所を、四角でドラッグして囲む", "add": "追加する頂点（先端）をクリック",
                 "origin": "選択中の段の起点（波形の左端）をクリック", "calib": "1点目、2点目の順にクリック",
@@ -1683,7 +1695,10 @@ class MainWindow(QMainWindow):
             return
         self.sel_band = row
         self.sel_vertex = None
+        self.sel_set = [t for t in self.sel_set if t[0] == row] if self.lock_others else self.sel_set
         self.refresh_panels()
+        self._apply_lock_state()
+        self._draw_selection()
         if self.ver_range is not None:
             self._show_verify_range()
 
@@ -1793,6 +1808,8 @@ class MainWindow(QMainWindow):
     def on_vertex_selected(self, bi, vi, from_canvas=False, additive=False):
         """Select a vertex. A plain click selects only this one; Ctrl/Shift+click adds or removes it."""
         e = self.engine
+        if self.lock_others and bi != self.sel_band:
+            return                                   # the other bands are locked
         if bi != self.sel_band:
             self.sel_band = bi
             self.band_list.blockSignals(True)
@@ -2233,7 +2250,7 @@ class MainWindow(QMainWindow):
         self._set_state("解析", "除外範囲を反映中…")
 
         def job(cb):
-            return e.add_exclusions(rects, cb)
+            return e.add_exclusions(rects, cb, only_band=(self.sel_band if (self.lock_others and e.bands) else None))
 
         def done(affected):
             self.dirty = True
@@ -2258,10 +2275,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ exclusions
     def add_exclusion_rect(self, x0, y0, x1, y1):
         e = self.engine
+        only = self.sel_band if (self.lock_others and e.bands) else None
+        if only is not None:
+            others = e.exclusion_conflicts((x0, y0, x1, y1), only)
+            if others:
+                names = "・".join(e.bands[i].name for i in others)
+                if not self._confirm(f"この範囲には、{names}の線もかかっています。\n\n除外すると、今後の解析で、この範囲の線は使われなくなります。"
+                                     f"いま引き直すのは{e.bands[only].name}だけで、{names}は、いまの線のままにします（要確認に印が付きます）。\n続けますか？"):
+                    return
         self._set_state("解析", "除外範囲を反映中…")
 
         def job(cb):
-            return e.add_exclusion(x0, y0, x1, y1, cb)
+            return e.add_exclusion(x0, y0, x1, y1, cb, only_band=only)
 
         def done(affected):
             self.dirty = True
@@ -2567,6 +2592,11 @@ class MainWindow(QMainWindow):
             v = b.vertices[vi]
             self.sel_list.addItem(f"{'山' if v.kind == 'peak' else '谷'}  #{vi + 1}  X={v.x * inv:.0f}  Y={v.y * inv:.0f}")
         self.sel_title.setText(f"選択中: {len(chosen)}点（{b.name}）" + ("　※ドラッグで動くのは、つかんだ1点だけ" if len(chosen) > 1 else ""))
+        others = [x.name for i, x in enumerate(e.bands) if i != self.sel_band]
+        self.lock_label.setText(
+            f"<span style='color:{b.color};font-size:16px'>■</span> <b>編集中の段: {b.name}</b>　" +
+            (f"ほかの段（{'・'.join(others)}）は<b>ロック中</b>：薄く表示され、触れません" if self.lock_others
+             else "ほかの段も編集できます（ロックなし）"))
         n_pend = len(b.pending)
         self.pend_title.setText(f"未適用の修正: {n_pend}件" if n_pend else "未適用の修正: なし")
         if not n_pend:
@@ -2575,6 +2605,38 @@ class MainWindow(QMainWindow):
             self.erase_label.setText(f"消す予定の線: 約{getattr(self, 'erase_count', 0) / e.scale:.0f}px分（赤い点）。「消す」で確定／Escでやめます")
         else:
             self.erase_label.setText("消した範囲: " + (f"{len(b.erased)}か所（戻す(Ctrl+Z)で戻せます）" if b.erased else "なし"))
+
+    # ----------------------------------------- lock the bands that are not being edited
+    def _lock_toggled(self, on):
+        self.lock_others = on
+        self._apply_lock_state()
+        self.update_edit_tab()
+        self._info("ほかの段をロックしました。選んでいる段だけを編集できます" if on else "ロックを外しました。すべての段を編集できます")
+
+    def _apply_lock_state(self):
+        """With the lock on, only the selected band can be touched: the others are dimmed and ignore the mouse."""
+        lock = self.lock_others
+        for bi, d in self.band_items.items():
+            active = (bi == self.sel_band) or not lock
+            op = 1.0 if active else 0.35
+            btn = Qt.AllButtons if active else Qt.NoButton
+            movable = active and self.tool == "select"
+            for it in d["vertices"]:
+                it.setAcceptedMouseButtons(btn)
+                it.setOpacity(op)
+                it.set_editable(movable)
+            if d.get("end") is not None:
+                d["end"].setAcceptedMouseButtons(btn)
+                d["end"].setOpacity(op)
+                d["end"].set_editable(movable)
+            for it in d["lines"].values():
+                it.setAcceptedMouseButtons(btn)
+                it.setFlag(it.GraphicsItemFlag.ItemIsMovable, active)
+                it.setOpacity(op)
+            if d["path"] is not None:
+                d["path"].setOpacity(1.0 if active else 0.5)
+            for it in (*d["inferred"], *d["issues"], *d.get("sections", []), *d.get("reads", [])):
+                it.setOpacity(op)
 
     # ------------------------------------------------------------------ delete
     @staticmethod

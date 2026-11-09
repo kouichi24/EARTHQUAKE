@@ -26,7 +26,7 @@ class LineConstraint:
     another piece of line lies on its extension (in the direction the line was heading, within `jump` px), the point
     can be taken over to that piece. snap() then sets `last_bridge` = (end of the line, landing point)."""
 
-    def __init__(self, skel, start_xy, limit=150, jump=160, cone_cos=0.7, y_range=None):
+    def __init__(self, skel, start_xy, limit=150, jump=160, cone_cos=0.7, y_range=None, forbid=None):
         from skimage.graph import MCP_Geometric
         import cv2 as _cv2
         h, w = skel.shape
@@ -44,7 +44,9 @@ class LineConstraint:
         j = int(np.argmin(d))
         if d[j] > 8:
             return
-        costs = np.where(sub, 1.0, np.inf)
+        ok_pix = sub if forbid is None else (sub & ~forbid[y0:y1, x0:x1])      # the lines of other bands are off limits
+        costs = np.where(ok_pix, 1.0, np.inf)
+        costs[int(ys[j]), int(xs[j])] = 1.0
         cum, _tb = MCP_Geometric(costs, fully_connected=True).find_costs([(int(ys[j]), int(xs[j]))])
         reach = np.isfinite(cum) & (cum <= limit)
         ry, rx = np.nonzero(reach)
@@ -71,7 +73,10 @@ class LineConstraint:
         reach2 = np.zeros(sub2.shape, np.uint8)
         reach2[y0 - Y0:y1 - Y0, x0 - X0:x1 - X0] = reach.astype(np.uint8)
         far = _cv2.distanceTransform((reach2 == 0).astype(np.uint8), _cv2.DIST_L2, 3) > 6      # not the same piece
-        cy, cx = np.nonzero(sub2 & far)
+        cand_mask = sub2 & far
+        if forbid is not None:
+            cand_mask &= ~forbid[Y0:Y1, X0:X1]
+        cy, cx = np.nonzero(cand_mask)
         if len(cx) == 0:
             return
         cpts = np.stack([cx + X0, cy + Y0], 1).astype(float)
@@ -757,6 +762,11 @@ class Engine:
             y0, y1 = max(0, int(r["y0"])), min(h, int(r["y1"]) + 1)
             self.prepared.ink[y0:y1, x0:x1] = False
 
+    def exclusion_conflicts(self, rect, band):
+        """Other bands whose line runs through the rectangle (they would be affected by an exclusion)."""
+        r = dict(x0=min(rect[0], rect[2]), y0=min(rect[1], rect[3]), x1=max(rect[0], rect[2]), y1=max(rect[1], rect[3]))
+        return [i for i in self._bands_touching(r) if i != band]
+
     def _bands_touching(self, rect, margin=6):
         x0, y0, x1, y1 = rect["x0"] - margin, rect["y0"] - margin, rect["x1"] + margin, rect["y1"] + margin
         hit = []
@@ -772,14 +782,14 @@ class Engine:
             progress(f"{self.bands[i].name}を引き直し中", 0.5 + 0.45 * k / max(1, len(idx)))
             self._replace_band(i, self._trace_new_band(i, origins))
 
-    def add_exclusion(self, x0, y0, x1, y1, progress=_noop):
+    def add_exclusion(self, x0, y0, x1, y1, progress=_noop, only_band=None):
         """Ignore everything inside the rectangle (e.g. letters touching the trace) and re-trace the bands
         whose line ran through it. Other bands and their edits are not touched. Before the first analysis the
         rectangle is just remembered and applied when the analysis runs."""
         rect = dict(x0=float(min(x0, x1)), y0=float(min(y0, y1)), x1=float(max(x0, x1)), y1=float(max(y0, y1)))
-        return self.add_exclusions([rect], progress)
+        return self.add_exclusions([rect], progress, only_band)
 
-    def add_exclusions(self, rects, progress=_noop):
+    def add_exclusions(self, rects, progress=_noop, only_band=None):
         rects = [dict(x0=float(min(r["x0"], r["x1"])), y0=float(min(r["y0"], r["y1"])),
                       x1=float(max(r["x0"], r["x1"])), y1=float(max(r["y0"], r["y1"]))) for r in rects]
         for r in rects:
@@ -790,11 +800,19 @@ class Engine:
             self.graph = None
             self.prepared = None
             return []
-        affected = sorted({i for r in rects for i in self._bands_touching(r)})
+        touched = sorted({i for r in rects for i in self._bands_touching(r)})
+        affected = touched
+        self.untouched_by_exclusion = []
+        if only_band is not None:                # edit one band: the lines of the other bands are left exactly as they are
+            affected = [i for i in touched if i == only_band]
+            self.untouched_by_exclusion = [i for i in touched if i != only_band]
         self.exclusions += rects
         self.graph = None
         self.ensure_graph(progress)
         self._retrace_bands(affected, progress)
+        for j in self.untouched_by_exclusion:
+            self.bands[j].issues.append(Issue("exclusion_pending", self.bands[j].path[-1][0] * 0.0 + rects[0]["x0"], rects[0]["y0"],
+                                              "除外範囲に、この段の線がかかっています（この段は引き直していません。必要なら引き直してください）"))
         return affected
 
     def suggest_exclusions(self, progress=_noop):
@@ -928,10 +946,30 @@ class Engine:
             if len(origins) >= 2 or band in self.band_ranges:
                 corr, _z = self._zone(band, origins)
                 y_range = (corr[2], corr[3])
-        lc = LineConstraint(self.graph.skel, (x, y), limit, self.params.drag_jump_px if jump is None else jump, y_range=y_range)
+        forbid = self._other_band_mask(band) if band is not None else None
+        lc = LineConstraint(self.graph.skel, (x, y), limit, self.params.drag_jump_px if jump is None else jump,
+                            y_range=y_range, forbid=forbid)
         return lc if lc.ok else None
 
     # ---------------------------------------------------------------- routing
+    def _other_band_mask(self, bi):
+        """Pixels (a little thickened) that the lines of the OTHER bands run along. While one band is edited its
+        lines must not be taken over by the edit, so routes avoid these pixels and points do not snap onto them."""
+        if self.graph is None or bi is None or bi < 0:
+            return None
+        others = [(j, b) for j, b in enumerate(self.bands) if j != bi and len(b.path)]
+        key = (bi, self.graph.skel.shape, tuple((j, len(b.path), int(b.path[0, 0]), int(b.path[-1, 0]), int(b.path[:, 1].sum()))
+                                                for j, b in others))
+        cache = getattr(self, "_omask_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        m = np.zeros(self.graph.skel.shape, np.uint8)
+        for _j, b in others:
+            m[b.path[:, 1], b.path[:, 0]] = 1
+        m = cv2.dilate(m, np.ones((3, 3), np.uint8)) > 0
+        self._omask_cache = (key, m)
+        return m
+
     def _route(self, a, b, pad=150):
         """Shortest way along the skeleton from pixel a to pixel b (x, y). None if impossible."""
         g = self.graph
@@ -942,14 +980,17 @@ class Engine:
         y0, y1 = max(0, min(ya, yb) - pad), min(h, max(ya, yb) + pad + 1)
         sub = g.skel[y0:y1, x0:x1]
         cost = np.where(sub, 1.0, 1e4)
+        om = self._other_band_mask(self._tracing_band)
+        if om is not None:                                    # do not run along another band's line unless there is no other way
+            cost[sub & om[y0:y1, x0:x1]] = 40.0
         try:
             idx, c = route_through_array(cost, (ya - y0, xa - x0), (yb - y0, xb - x0),
                                          fully_connected=True, geometric=True)
         except Exception:
             return None
-        if c >= 1e4:
-            return None
         r = np.array([(x + x0, y + y0) for y, x in idx], np.int32)
+        if not g.skel[r[:, 1], r[:, 0]].all():           # the way had to leave the line: there is no route (the cost of
+            return None                                  # other bands' pixels can be high, so the sum is not a test)
         return r
 
     def _route_bridged(self, a, b, max_gap=None, pad=60):
@@ -1002,6 +1043,11 @@ class Engine:
         ys, xs = np.nonzero(g.skel[ya:yb, xa:xb])
         if len(xs) == 0:
             return None, None
+        om = self._other_band_mask(self._tracing_band)
+        if om is not None:                                    # prefer a pixel of this band's own line
+            mine = ~om[ys + ya, xs + xa]
+            if mine.any():
+                ys, xs = ys[mine], xs[mine]
         d = np.hypot(xs + xa - x, ys + ya - y)
         j = int(np.argmin(d))
         if d[j] > r:
@@ -1030,6 +1076,7 @@ class Engine:
         mode "tail" : a moved vertex re-traces the line from that vertex to the end
         mode "local": a moved vertex only changes the line between the vertices before and after it
         """
+        self._tracing_band = b.index                  # edits of this band must not use the lines of the others
         snap_before = b.snapshot()
         msgs = []
         moves = sorted([p for p in b.pending if p["type"] == "move"], key=lambda p: p["vi"])
