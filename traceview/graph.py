@@ -276,3 +276,70 @@ def add_virtual_edges(g, max_gap=150, cos_out=0.8, cos_in=0.5, max_dy_frac=0.45,
         used.add(b)
         added += 1
     return added
+
+
+def extend_steep_ends(g, norm_min, thr=0.85, ref_zone=None, min_len=15, max_ext=110, max_hole=9, min_ext=14, min_vy=0.5, min_share=0.55, max_first=8):
+    """Follow a thin steep stroke whose ink fades out (dashes, crossings under ruler lines) a little further.
+
+    A steep line end is prolonged straight along its own direction for as long as the image still shows ink
+    near the ray (holes up to `max_hole` px are crossed). The prolonged piece is an estimated connection (TR-06):
+    it is added as a virtual edge to a new end node. Returns the number of ends extended.
+    """
+    H, W = norm_min.shape
+    added = 0
+    for nid in range(len(g.nodes)):
+        n = g.nodes[nid]
+        if n.kind != "end" or len(n.edges) != 1:
+            continue
+        e = g.edges[n.edges[0]]
+        if e.inferred or e.length < min_len:
+            continue
+        pts = e.pix if e.a == nid else e.pix[::-1]
+        k = min(len(pts) - 1, 14)
+        v = (pts[0] - pts[k]).astype(float)
+        nv = np.hypot(*v)
+        if nv < 6:
+            continue
+        v /= nv
+        if abs(v[1]) < min_vy:
+            continue
+        perp = np.array([-v[1], v[0]])
+        last_ok, hole, hits = 0, 0, 0
+        hit_at = 0
+        for step in range(1, max_ext + 1):
+            if step == max_first + 1 and last_ok == 0:
+                break                     # the stroke has to go on right away (not after clean paper)
+            c = np.array([n.x, n.y]) + v * step
+            hit = False
+            xc, yc = int(round(c[0])), int(round(c[1]))
+            if ref_zone is not None and 0 <= xc < W and 0 <= yc < H and ref_zone[yc, xc] > 0:
+                continue                  # under a ruler / reference line: the ink there proves nothing
+            for off in (-2, -1, 0, 1, 2):
+                q = c + perp * off
+                xi, yi = int(round(q[0])), int(round(q[1]))
+                if 0 <= xi < W and 0 <= yi < H and norm_min[yi, xi] < thr:
+                    hit = True
+                    break
+            if hit:
+                last_ok, hole = step, 0
+                hits += 1
+            else:
+                hole += 1
+                if hole > max_hole:
+                    break
+        if last_ok < min_ext or hits < min_share * last_ok:
+            continue                      # a real stroke fades out; a ruler line far ahead does not count
+        tx, ty = n.x + v[0] * last_ok, n.y + v[1] * last_ok
+        if not (0 <= tx < W and 0 <= ty < H):
+            continue
+        m = int(max(2, last_ok))
+        xs = np.round(np.linspace(n.x, tx, m)).astype(np.int32)
+        ys = np.round(np.linspace(n.y, ty, m)).astype(np.int32)
+        g.nodes.append(Node(float(xs[-1]), float(ys[-1]), [], "end"))
+        nn = len(g.nodes) - 1
+        eid = len(g.edges)
+        g.edges.append(Edge(nid, nn, np.stack([xs, ys], 1), inferred=True))
+        n.edges.append(eid)
+        g.nodes[nn].edges.append(eid)
+        added += 1
+    return added

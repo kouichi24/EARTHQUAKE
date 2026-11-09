@@ -9,7 +9,7 @@ from skimage.graph import route_through_array
 
 from . import __version__
 from .config import Params
-from .graph import add_virtual_edges, bridge_gaps, build_graph, skeleton_of
+from .graph import add_virtual_edges, bridge_gaps, build_graph, extend_steep_ends, skeleton_of
 from .imageio import file_digest, load_image, make_work_image, page_count
 from .measure import Calibration, SectionSettings, arc_active, corrected_x_work, section_stats
 from .model import BAND_COLORS, BAND_NAMES, Band, Issue
@@ -224,6 +224,8 @@ class Engine:
             ink2, _ = bridge_gaps(self.prepared.ink, g, max_gap=20, cos_min=0.6, max_vy=1.1, evidence=self.gap_evidence)
             g = build_graph(skeleton_of(ink2), self.params.spur_min_len)
             add_virtual_edges(g, max_gap=self.params.virtual_max_gap, max_dy_frac=0.25, evidence=self.gap_evidence)
+            if self.prepared.norm_min is not None:
+                extend_steep_ends(g, self.prepared.norm_min, self.params.gap_evidence_thr, ref_zone=self.prepared.ref_zone)
         self.graph = g
         self.ink = ink2
 
