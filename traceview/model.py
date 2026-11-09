@@ -34,6 +34,8 @@ class Band:
     manual_points: list = field(default_factory=list)  # dicts {x, y, kind: moved|added}
     pending: list = field(default_factory=list)        # dicts {type, ox, oy, x, y}
     sections: list = field(default_factory=list)       # dicts {name, x0, x1} in work px
+    guide: list = field(default_factory=list)           # rough route the user drew for this band: [[x, y], ...] (work px)
+    guide_width: float = 0.0                            # how far from the route the line may be (work px); 0 = automatic
     erased: list = field(default_factory=list)          # rectangles in which the traced LINE was erased by the user (work px)
     cuts: list = field(default_factory=list)            # path indices j where the line is broken between j and j+1 (erased stretch)
     deleted_points: list = field(default_factory=list)  # vertices the user deleted: dicts {x, y} (work px), kept across re-tracing
@@ -63,6 +65,7 @@ class Band:
             pending=copy.deepcopy(self.pending) if with_pending else [],
             sections=copy.deepcopy(self.sections), deleted_points=copy.deepcopy(self.deleted_points),
             erased=copy.deepcopy(self.erased), cuts=list(self.cuts),
+            guide=copy.deepcopy(self.guide), guide_width=self.guide_width,
             line_zero=self.line_zero, line_top=self.line_top, line_bottom=self.line_bottom,
             line_top_manual=self.line_top_manual, line_bottom_manual=self.line_bottom_manual,
             line_zero_manual=self.line_zero_manual,
@@ -83,6 +86,8 @@ class Band:
         self.sections = copy.deepcopy(snap.get("sections", []))
         self.deleted_points = copy.deepcopy(snap.get("deleted_points", []))
         self.erased = copy.deepcopy(snap.get("erased", []))
+        self.guide = copy.deepcopy(snap.get("guide", []))
+        self.guide_width = snap.get("guide_width", 0.0)
         self.cuts = list(snap.get("cuts", []))
         self.issues = copy.deepcopy(snap["issues"])
 

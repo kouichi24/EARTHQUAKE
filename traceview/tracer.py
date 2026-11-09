@@ -38,8 +38,10 @@ def _heading(pix, from_start, k=K_HEAD):
 class Walker:
     """Directed-edge walk: every skeleton edge is traversed at most once per direction."""
 
-    def __init__(self, graph, params, corridor=None, spur_max=220, ref_zone=None, occupied=None):
+    def __init__(self, graph, params, corridor=None, spur_max=220, ref_zone=None, occupied=None, guide=None):
         self.g = graph
+        self.guide = guide              # rough route drawn by the user: dict(dt, x0, x1, w, hard) or None
+        self._gcache = {}
         self.occupied = occupied or set()   # edges taken by other bands: a later band avoids them
         self.ref_zone = ref_zone
         self._refpen = {}
@@ -64,6 +66,8 @@ class Walker:
         s -= self._ref_penalty(eid)
         if eid in self.occupied:
             s -= 1.6
+        if self.guide is not None and not (far.kind == "end" and e.length <= self.spur_max):
+            s -= self._guide_penalty(eid)
         if self.corridor is not None:
             lo_s, hi_s, lo_h, hi_h = self.corridor
             if far.y < lo_s or far.y > hi_s:
@@ -72,10 +76,35 @@ class Walker:
                 s -= 0.8
         return s
 
+    def _guide_stats(self, eid):
+        """(inside the guide's x range?, nearest distance, median distance) of an edge to the drawn route."""
+        v = self._gcache.get(eid)
+        if v is None:
+            gd = self.guide
+            pix = self.g.edges[eid].pix
+            inside = bool((pix[:, 0] >= gd["x0"] - gd["w"]).all() and (pix[:, 0] <= gd["x1"] + gd["w"]).all())
+            if inside:
+                d = gd["dt"][pix[:, 1], pix[:, 0]]
+                v = (True, float(d.min()), float(np.median(d)))
+            else:
+                v = (False, 0.0, 0.0)
+            self._gcache[eid] = v
+        return v
+
+    def _guide_penalty(self, eid):
+        """A route edge far from the drawn route is a worse choice (spikes that stick out of the route are not affected)."""
+        inside, _dmin, dmed = self._guide_stats(eid)
+        if not inside:
+            return 0.0
+        w = self.guide["w"]
+        return 0.8 * min(2.0, max(0.0, (dmed - w) / w))
+
     def _outside_edges(self):
         """Edges that lie in another band's territory are never entered (TR-01: no hopping to a neighbour)."""
-        if self.corridor is None:
+        if self.corridor is None and self.guide is None:
             return ()
+        if self.corridor is None:
+            self._outside = set()
         if getattr(self, "_outside", None) is None:
             lo, hi = self.corridor[0] - 20, self.corridor[1] + 20
             out = set()
@@ -86,7 +115,21 @@ class Walker:
                 if np.median(y) < lo or np.median(y) > hi:
                     out.add(i)
             self._outside = out
-        return self._outside
+        out = self._outside
+        if self.guide is not None:
+            # an edge that lies in the guide's range and keeps far away from the drawn route is never entered
+            if getattr(self, "_guide_blocked", None) is None:
+                blocked = set()
+                for i, e in enumerate(self.g.edges):
+                    if e.inferred:
+                        continue
+                    inside, _dmin, dmed = self._guide_stats(i)
+                    is_spur = (self.g.nodes[e.a].kind == "end" or self.g.nodes[e.b].kind == "end") and e.length <= self.spur_max
+                    if inside and not is_spur and dmed > self.guide["hard"]:
+                        blocked.add(i)
+                self._guide_blocked = blocked
+            out = set(out) | self._guide_blocked
+        return out
 
     def _ref_penalty(self, eid):
         """Edges that run along a reference line are only taken when nothing else is possible."""

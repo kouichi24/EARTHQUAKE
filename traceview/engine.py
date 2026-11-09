@@ -146,6 +146,8 @@ class Engine:
         self.readouts = []          # points read from the trace: dicts {band, x, y} (work px)
         self.exclusions = []        # rectangles whose ink is ignored (text, stains): dicts {x0, y0, x1, y1} (work px)
         self.band_ranges = {}       # band index -> (y_top, y_bottom) in work px chosen by the user (the band's territory)
+        self._guide_override = None  # (points, width) used instead of the band's own guide while a re-trace is prepared
+        self._guide_cache = None
         self._tracing_band = -1     # index of the band being traced (its own lines are not 'occupied')
         self._origins_hint = None   # origins of all bands while they are being traced one after the other
 
@@ -338,6 +340,60 @@ class Engine:
                 out.append(base[i])
         return out
 
+    # --------------------------------------------- rough route drawn by the user
+    def _guide_for(self, bi):
+        """The rough route of a band as data for the tracer (distance to the route for every pixel), or None."""
+        if self._guide_override is not None and bi == self._tracing_band:
+            pts, width = self._guide_override
+        elif bi is not None and 0 <= bi < len(self.bands):
+            pts, width = self.bands[bi].guide, self.bands[bi].guide_width
+        else:
+            return None
+        if not pts or len(pts) < 2:
+            return None
+        h, w = self.work.shape[:2]
+        key = (tuple(map(tuple, pts)), float(width), h, w)
+        if self._guide_cache is not None and self._guide_cache[0] == key:
+            return self._guide_cache[1]
+        mask = np.full((h, w), 255, np.uint8)
+        cv2.polylines(mask, [np.array(pts, np.int32).reshape(-1, 1, 2)], False, 0, 1)
+        dt = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
+        xs = [p[0] for p in pts]
+        wd = float(width) if width and width > 0 else 40.0
+        data = dict(dt=dt, x0=float(min(xs)), x1=float(max(xs)), w=wd, hard=max(3 * wd, 120.0))
+        self._guide_cache = (key, data)
+        return data
+
+    def retrace_with_guide(self, bi, points, width=0.0, progress=_noop):
+        """Trace a band again along a rough route drawn by the user (undoable). The route is only a hint: the line
+        that follows it most closely is preferred, lines far from it are not entered, spikes sticking out are kept."""
+        if len(points) < 2:
+            raise EngineError("道筋には、2点以上が必要です")
+        self.ensure_graph(progress)
+        self._guide_override = ([list(map(float, p)) for p in points], float(width))
+        try:
+            self._tracing_band = bi
+            nb = self._trace_new_band(bi, self._origin_list())
+        finally:
+            self._guide_override = None
+        nb.traced = True
+        return self._replace_band(bi, nb)
+
+    def clear_guide(self, bi, progress=_noop):
+        """Remove the rough route of a band and trace the band again without it."""
+        b = self.bands[bi]
+        if not b.guide:
+            return b
+        self.ensure_graph(progress)
+        self._guide_override = ([], 0.0)
+        try:
+            self._tracing_band = bi
+            nb = self._trace_new_band(bi, self._origin_list())
+        finally:
+            self._guide_override = None
+        nb.traced = True
+        return self._replace_band(bi, nb)
+
     # ------------------------------------------- vertical range of a band (user's check)
     def check_range(self, bi, top, bot):
         """Does the line really go as far as the chosen top / bottom? What would the range cut off?
@@ -471,7 +527,8 @@ class Engine:
         W = self.work.shape[1]
         x_right = self.prepared.paper[2]
         walker = Walker(g, self.params, corr, ref_zone=self.prepared.ref_zone,
-                        occupied=self._occupied_edges(exclude=self._tracing_band))
+                        occupied=self._occupied_edges(exclude=self._tracing_band),
+                        guide=self._guide_for(self._tracing_band))
         pieces, rev, amb, inf = [], [], [], []
         confirmed_edges = self._confirmed_edges(self._tracing_band) if use_confirmed else set()
         used_nodes = set()
@@ -709,8 +766,13 @@ class Engine:
 
     def _trace_new_band(self, i, origins):
         self._tracing_band = i
+        old = self.bands[i] if i < len(self.bands) else None
         ox, oy = origins[i]
         b = Band(i, BAND_NAMES[i] if i < 3 else f"波形{i + 1}", BAND_COLORS[i % len(BAND_COLORS)], (ox, oy), float(oy))
+        if self._guide_override is not None:
+            b.guide, b.guide_width = [list(p) for p in self._guide_override[0]], float(self._guide_override[1])
+        elif old is not None:
+            b.guide, b.guide_width = [list(p) for p in old.guide], old.guide_width
         corr, zone = self._zone(i, origins)
         node = self._start_node(ox, oy)
         if node is None:

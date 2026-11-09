@@ -29,6 +29,7 @@ def _snap_to_json(s):
         line_top_manual=s["line_top_manual"], line_bottom_manual=s["line_bottom_manual"],
         line_zero_manual=s.get("line_zero_manual", False), sections=s.get("sections", []), deleted_points=s.get("deleted_points", []),
         erased=s.get("erased", []), cuts=s.get("cuts", []),
+        guide=s.get("guide", []), guide_width=s.get("guide_width", 0.0),
         end_x=s["end_x"], complete=s["complete"], confirmed=s["confirmed"], y0=s["y0"],
         issues=[i.to_dict() if hasattr(i, "to_dict") else i for i in s["issues"]],
     )
@@ -42,6 +43,7 @@ def _snap_from_json(d):
         line_top_manual=d["line_top_manual"], line_bottom_manual=d["line_bottom_manual"],
         line_zero_manual=d.get("line_zero_manual", False), sections=d.get("sections", []), deleted_points=d.get("deleted_points", []),
         erased=d.get("erased", []), cuts=d.get("cuts", []),
+        guide=d.get("guide", []), guide_width=d.get("guide_width", 0.0),
         end_x=d["end_x"], complete=d["complete"], confirmed=d["confirmed"], y0=d["y0"],
         issues=[Issue(**i) for i in d["issues"]],
     )

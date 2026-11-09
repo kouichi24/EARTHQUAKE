@@ -104,6 +104,8 @@ class MainWindow(QMainWindow):
         self.rev_items = []
         self.excl_items = []
         self.bridge_item = None
+        self.guide_pts = []         # rough route being drawn (work px), not applied yet
+        self.guide_items = []
         self.cand = []              # exclusion candidates found by the program
         self.cand_items = []
         self.sel_coords = {}
@@ -422,6 +424,40 @@ class MainWindow(QMainWindow):
         f1.addRow(bn)
         l1.addLayout(f1)
         cl2.addWidget(g1)
+        gg = QGroupBox("①-b 通る道を、大まかに描く（任意。線の取り違えを防ぎます）")
+        lgg = QVBoxLayout(gg)
+        lgg.addWidget(QLabel("波形が通るおおよその道筋を、画像上でクリックして描きます（左から右へ、数か所でOK）。"
+                             "その道に近い線を優先してたどり、道から遠い線へは入りません。波形から突き出る尖った波は、そのまま追跡されます。"
+                             "道の一部（取り違えやすい所だけ）を描いても使えます。"))
+        rg = QHBoxLayout()
+        bg1 = QPushButton("道を描く（クリックで点を打つ）")
+        bg1.clicked.connect(self.action_start_guide)
+        bg2 = QPushButton("最後の点を消す")
+        bg2.clicked.connect(self.guide_undo_point)
+        bg3 = QPushButton("描き直す")
+        bg3.clicked.connect(self.guide_reset)
+        for w_ in (bg1, bg2, bg3):
+            rg.addWidget(w_)
+        lgg.addLayout(rg)
+        fg = QFormLayout()
+        self.guide_width_spin = QDoubleSpinBox()
+        self.guide_width_spin.setRange(5, 2000)
+        self.guide_width_spin.setValue(40)
+        self.guide_width_spin.setDecimals(0)
+        self.guide_width_spin.setToolTip("道からどれくらいまでの線を『道に沿っている』とみなすか（元画像のpx）")
+        fg.addRow("道の幅 [px]", self.guide_width_spin)
+        lgg.addLayout(fg)
+        self.guide_label = QLabel("")
+        lgg.addWidget(self.guide_label)
+        rg2 = QHBoxLayout()
+        bg4 = QPushButton("この道に沿って引き直す")
+        bg4.clicked.connect(self.action_apply_guide)
+        bg5 = QPushButton("道を消して引き直す")
+        bg5.clicked.connect(self.action_clear_guide)
+        rg2.addWidget(bg4)
+        rg2.addWidget(bg5)
+        lgg.addLayout(rg2)
+        cl2.addWidget(gg)
         g2 = QGroupBox("② その範囲まで線が届いているか確認する")
         l2 = QVBoxLayout(g2)
         b2 = QPushButton("範囲の線を確認")
@@ -921,6 +957,118 @@ class MainWindow(QMainWindow):
         self._update_enabled()
         self.action_analyze(force=True)
 
+    # ----------------------------------------------- rough route (guide) of a band
+    def action_start_guide(self):
+        if not self.engine.bands:
+            return
+        self.guide_pts = []
+        self._draw_guide()
+        self.set_tool("guide")
+        self.update_confirm_tab()
+
+    def guide_undo_point(self):
+        if self.guide_pts:
+            self.guide_pts.pop()
+            self._draw_guide()
+            self.update_confirm_tab()
+
+    def guide_reset(self):
+        self.guide_pts = []
+        self._draw_guide()
+        self.update_confirm_tab()
+
+    def _draw_guide(self):
+        for it in self.guide_items:
+            if it.scene() is self.scene:
+                self.scene.removeItem(it)
+        self.guide_items = []
+        e = self.engine
+        if e.work is None:
+            return
+        for bi, b in enumerate(e.bands):                    # routes already in use
+            if len(b.guide) >= 2:
+                col = QColor(b.color)
+                w = (b.guide_width or 40.0)
+                wide = make_path_item(polyline_path([tuple(p) for p in b.guide]), col.name(), 1, z=2)
+                pen = QPen(QColor(col.red(), col.green(), col.blue(), 45), 2 * w)
+                pen.setCapStyle(Qt.RoundCap)
+                pen.setJoinStyle(Qt.RoundJoin)
+                wide.setPen(pen)
+                wide.setToolTip(f"{b.name}の通る道（幅 {w / e.scale:.0f}px）")
+                core = make_path_item(polyline_path([tuple(p) for p in b.guide]), col.name(), 2, dashed=True, z=3)
+                for it in (wide, core):
+                    self.scene.addItem(it)
+                    self.guide_items.append(it)
+        if self.guide_pts:                                   # the route being drawn
+            col = QColor("#2979ff")
+            if len(self.guide_pts) >= 2:
+                it = make_path_item(polyline_path(self.guide_pts), col.name(), 3, dashed=True, z=49)
+                self.scene.addItem(it)
+                self.guide_items.append(it)
+            for (x, y) in self.guide_pts:
+                m = QGraphicsEllipseItem(-5, -5, 10, 10)
+                m.setPos(x, y)
+                m.setBrush(QBrush(col))
+                m.setPen(QPen(QColor("white"), 1))
+                m.setFlag(QGraphicsEllipseItem.ItemIgnoresTransformations, True)
+                m.setZValue(50)
+                self.scene.addItem(m)
+                self.guide_items.append(m)
+        self.apply_visibility()
+
+    def action_apply_guide(self):
+        e = self.engine
+        b = self.current_band()
+        if b is None:
+            return
+        if len(self.guide_pts) < 2:
+            self._info("道筋を描いてください（画像上を、2点以上クリック）")
+            return
+        bi = self.sel_band
+        pts = list(self.guide_pts)
+        width = self.guide_width_spin.value() * e.scale
+        self._set_state("再追跡", "道に沿って引き直し中…")
+
+        def job(cb):
+            return e.retrace_with_guide(bi, pts, width, cb)
+
+        def done(_nb):
+            self.guide_pts = []
+            self.dirty = True
+            self._set_state("再追跡", f"{e.bands[bi].name}を、描いた道に沿って引き直しました")
+            self.set_tool("select")
+            self._build_band_items(bi)
+            self.apply_visibility()
+            self.refresh_panels()
+            self._draw_guide()
+
+        self.run_task("道に沿って引き直しています…", job, done,
+                      lambda m: (self._set_state("再追跡", "失敗"), self._show_error(m)))
+
+    def action_clear_guide(self):
+        e = self.engine
+        b = self.current_band()
+        if b is None:
+            return
+        self.guide_pts = []
+        bi = self.sel_band
+        if not b.guide:
+            self._draw_guide()
+            self.update_confirm_tab()
+            return
+
+        def job(cb):
+            return e.clear_guide(bi, cb)
+
+        def done(_nb):
+            self.dirty = True
+            self._build_band_items(bi)
+            self.apply_visibility()
+            self.refresh_panels()
+            self._draw_guide()
+
+        self.run_task("道を消して引き直しています…", job, done)
+
     # ------------------------------------------------------ one band checked by the user
     def _band_range(self, bi):
         """The range to show: the one just picked, else the one in use, else None."""
@@ -1055,6 +1203,11 @@ class MainWindow(QMainWindow):
                                           + ("（この範囲で解析済み）" if using else "（選んだだけ。③で引き直すと反映）"))
             self.rng_top.setValue(rng[0] * inv)
             self.rng_bot.setValue(rng[1] * inv)
+        if b.guide:
+            self.guide_label.setText(f"この段の道筋: {len(b.guide)}点（幅 {(b.guide_width or 40.0) / e.scale:.0f}px）で設定済み" +
+                                     (f"／描いている途中: {len(self.guide_pts)}点" if self.guide_pts else ""))
+        else:
+            self.guide_label.setText(f"道筋は未設定" + (f"（描いている途中: {len(self.guide_pts)}点）" if self.guide_pts else ""))
         left = len(e.untraced_bands())
         self.conf_next_label.setText(f"未解析の段が{left}段あります。「確認済みにして次の段へ」で、次の段を解析します。" if left
                                      else ("次の段へ進みます。" if self.sel_band + 1 < n else "これが最後の段です。"))
@@ -1431,6 +1584,7 @@ class MainWindow(QMainWindow):
         self.range_items = []
         self.sel_set, self.sel_rings, self.edit_preview_items, self.erase_items = [], [], [], []
         self.cand_items = []
+        self.guide_items = []
         self.erase_pending = None
         self.ver_range_item = None
         self.pix_item = None
@@ -1622,7 +1776,7 @@ class MainWindow(QMainWindow):
         self.a_hide_all.setText("図形を表示に戻す" if hide else "図形を全部消す")
         for extra in (self.sel_ring, self.replay_marker, self.section_preview, *self.rev_items, *self.excl_items,
                       self.ver_range_item, *getattr(self, "range_items", []), *self.sel_rings, *self.edit_preview_items,
-                      *self.erase_items, *self.cand_items):
+                      *self.erase_items, *self.cand_items, *self.guide_items):
             if extra is not None and extra.scene() is self.scene:
                 extra.setVisible(not hide)
         if self.pix_item is not None:
@@ -1660,12 +1814,12 @@ class MainWindow(QMainWindow):
     def set_tool(self, tool):
         self.tool = tool
         for name, act in (("select", self.t_select), ("add", self.t_add), ("origin", self.t_origin),
-                          ("section", self.t_section), ("read", self.t_read), ("excl", self.t_excl), ("erase", self.t_erase),
+                          ("section", self.t_section), ("read", self.t_read), ("excl", self.t_excl), ("erase", self.t_erase), ("guide", None),
                           ("vrange", None), ("brange", None)):
             if act is None:
                 continue
             act.setChecked(name == tool)
-        self.view.click_tool = tool in ("add", "origin", "calib", "read")
+        self.view.click_tool = tool in ("add", "origin", "calib", "read", "guide")
         self.view.drag_tool = tool in ("section", "excl", "vrange", "brange", "select", "erase")
         self.view.drag_over_items = tool == "select"
         for d in self.band_items.values():
@@ -1675,7 +1829,8 @@ class MainWindow(QMainWindow):
                 d["end"].set_editable(tool == "select")
         self._apply_lock_state()
         hint = {"select": "点の編集: 点をクリックで選択（Ctrl+クリックで追加）／空いた所をドラッグで枠選択／点をドラッグで1点だけ移動／Deleteで削除／測定線は上下にドラッグ",
-                "erase": "トレース線を消したい所を、四角でドラッグして囲む", "add": "追加する頂点（先端）をクリック",
+                "erase": "トレース線を消したい所を、四角でドラッグして囲む",
+                "guide": "波形が通るおおよその道筋を、左から右へ、クリックで点を打って描く（Escでやり直し）", "add": "追加する頂点（先端）をクリック",
                 "origin": "選択中の段の起点（波形の左端）をクリック", "calib": "1点目、2点目の順にクリック",
                 "section": "測定したい範囲を横にドラッグ（選択中の段に追加）",
                 "read": "値を読みたい点をトレース上でクリック（選択中の段）",
@@ -1715,6 +1870,7 @@ class MainWindow(QMainWindow):
         self.update_confirm_tab()
         self.update_edit_tab()
         self._draw_range_items()
+        self._draw_guide()
         b = self.current_band()
         self.cb_confirm.blockSignals(True)
         self.cb_confirm.setChecked(bool(b and b.confirmed))
@@ -2046,6 +2202,10 @@ class MainWindow(QMainWindow):
                 self.refresh_panels()
 
             self.run_task("再追跡中…", job, done)
+        elif self.tool == "guide":
+            self.guide_pts.append((pt.x(), pt.y()))
+            self._draw_guide()
+            self.update_confirm_tab()
         elif self.tool == "read":
             row = e.read_point(self.sel_band, pt.x(), pt.y())
             if row is None:
@@ -2100,6 +2260,9 @@ class MainWindow(QMainWindow):
         """Esc: cancel the unapplied edits and the erase waiting for confirmation; with nothing pending, clear the selection."""
         b = self.current_band()
         if b is None:
+            return
+        if self.tool == "guide" and self.guide_pts:
+            self.guide_reset()
             return
         if self.erase_pending is not None:
             self.cancel_pending_erase()
