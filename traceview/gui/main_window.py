@@ -1591,6 +1591,7 @@ class MainWindow(QMainWindow):
         self.excl_items = []
         self.range_items = []
         self.sel_set, self.sel_rings, self.edit_preview_items, self.erase_items = [], [], [], []
+        self.sel_labels = []
         self.cand_items = []
         self.guide_items = []
         self.erase_pending = None
@@ -2040,10 +2041,11 @@ class MainWindow(QMainWindow):
             self._draw_selection()
 
     def _draw_selection(self):
-        for it in self.sel_rings:
+        for it in list(self.sel_rings) + list(getattr(self, "sel_labels", [])):
             if it.scene() is self.scene:
                 self.scene.removeItem(it)
         self.sel_rings = []
+        self.sel_labels = []
         self.sel_ring = None
         e = self.engine
         self.sel_coords = {}
@@ -2078,7 +2080,7 @@ class MainWindow(QMainWindow):
             bg.setPen(QPen(Qt.NoPen))
             bg.setZValue(-1)
             self.scene.addItem(lab)
-            self.sel_rings.append(lab)
+            self.sel_labels.append(lab)
             if last:
                 self.sel_ring = ring
         if hasattr(self, "sel_hud"):
