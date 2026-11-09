@@ -98,6 +98,14 @@ class MainWindow(QMainWindow):
         self.view.cursorMoved.connect(self._on_cursor)
         self.view.zoomChanged.connect(self.apply_visibility)
         self.view.applyRequested.connect(self.action_apply)
+        self.view.deleteRequested.connect(self.action_delete_selected)
+        self.view.escapeRequested.connect(self.clear_selection)
+        self.sel_hud = QLabel("選択なし（頂点をクリック、または枠でドラッグして選ぶ）", self.view.viewport())
+        self.sel_hud.move(8, 8)
+        self.sel_hud.setStyleSheet("background:#ddd;color:#444;padding:3px 8px;")
+        self.sel_hud.adjustSize()
+        self.sel_hud.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.sel_hud.show()
         self.view.dragMoved.connect(self._section_drag_preview)
         self.view.dragFinished.connect(self._section_drag_done)
         self.section_preview = None
@@ -1990,6 +1998,7 @@ class MainWindow(QMainWindow):
         self.sp_y.setValue(v.y * inv)
         self._draw_selection()
         if from_canvas:
+            self.view.setFocus()                      # so Delete / Esc reach the image, not a text box
             self.v_table.blockSignals(True)
             self.v_table.selectRow(vi)
             self.v_table.scrollToItem(self.v_table.item(vi, 0))
@@ -2002,6 +2011,34 @@ class MainWindow(QMainWindow):
         self.sel_vertex = None
         self._draw_selection()
 
+    def _validate_selection(self):
+        """Re-resolve the selection by the coordinates stored when it was made. If the vertex list changed behind
+        the selection (undo, applying an edit, ...), a stored index may point at another vertex: follow the
+        coordinates, and drop entries whose vertex no longer exists."""
+        e = self.engine
+        coords = getattr(self, "sel_coords", {})
+        fixed = []
+        for (sb, sv) in self.sel_set:
+            if sb >= len(e.bands):
+                continue
+            vs = e.bands[sb].vertices
+            xy = coords.get((sb, sv))
+            if xy is None:
+                if 0 <= sv < len(vs):
+                    fixed.append((sb, sv))
+                continue
+            if 0 <= sv < len(vs) and abs(vs[sv].x - xy[0]) <= 1.5 and abs(vs[sv].y - xy[1]) <= 1.5:
+                fixed.append((sb, sv))
+                continue
+            for j, v in enumerate(vs):
+                if abs(v.x - xy[0]) <= 1.5 and abs(v.y - xy[1]) <= 1.5:
+                    fixed.append((sb, j))
+                    break
+        if fixed != self.sel_set:
+            self.sel_set = list(dict.fromkeys(fixed))
+            self.sel_vertex = self.sel_set[-1][1] if self.sel_set else None
+            self._draw_selection()
+
     def _draw_selection(self):
         for it in self.sel_rings:
             if it.scene() is self.scene:
@@ -2010,22 +2047,47 @@ class MainWindow(QMainWindow):
         self.sel_ring = None
         e = self.engine
         self.sel_coords = {}
+        n = 0
         for k, (bi, vi) in enumerate(self.sel_set):
             if bi >= len(e.bands) or vi >= len(e.bands[bi].vertices):
                 continue
+            n += 1
             v = e.bands[bi].vertices[vi]
             self.sel_coords[(bi, vi)] = (v.x, v.y)
-            r = 11
+            r = 13
+            last = (bi, vi) == (self.sel_band, self.sel_vertex)
+            col = QColor("#ffeb3b" if last else "#00e5ff")
             ring = QGraphicsEllipseItem(-r, -r, 2 * r, 2 * r)
             ring.setPos(v.x, v.y)
-            last = (bi, vi) == (self.sel_band, self.sel_vertex)
-            ring.setPen(QPen(QColor("#ffeb3b" if last else "#00e5ff"), 3))
+            ring.setPen(QPen(col, 4))
+            fill = QColor(col)
+            fill.setAlpha(70)
+            ring.setBrush(QBrush(fill))
             ring.setFlag(QGraphicsEllipseItem.ItemIgnoresTransformations, True)
+            ring.setAcceptedMouseButtons(Qt.NoButton)      # clicks go through to the vertex underneath
             ring.setZValue(40)
             self.scene.addItem(ring)
             self.sel_rings.append(ring)
+            lab = QGraphicsSimpleTextItem(f"選択 #{vi + 1}")
+            lab.setBrush(QBrush(QColor("black")))
+            lab.setFlag(QGraphicsSimpleTextItem.ItemIgnoresTransformations, True)
+            lab.setPos(v.x + 12, v.y - 30)
+            lab.setZValue(41)
+            bg = QGraphicsRectItem(lab.boundingRect().adjusted(-3, -1, 3, 1), lab)
+            bg.setBrush(QBrush(col))
+            bg.setPen(QPen(Qt.NoPen))
+            bg.setZValue(-1)
+            self.scene.addItem(lab)
+            self.sel_rings.append(lab)
             if last:
                 self.sel_ring = ring
+        if hasattr(self, "sel_hud"):
+            self.sel_hud.setText(
+                f"選択中：{n}点　（Delete で削除／Esc で選択解除）" if n else "選択なし（頂点をクリック、または枠でドラッグして選ぶ）")
+            self.sel_hud.setStyleSheet(
+                "background:#fdd835;color:black;font-weight:bold;padding:3px 8px;" if n
+                else "background:#ddd;color:#444;padding:3px 8px;")
+            self.sel_hud.adjustSize()
         self.apply_visibility()
         self.update_edit_tab()
 
@@ -2821,6 +2883,7 @@ class MainWindow(QMainWindow):
         b = self.current_band()
         if b is None:
             return
+        self._validate_selection()
         chosen = [vi for (bi, vi) in self.sel_set if bi == self.sel_band and 0 <= vi < len(b.vertices)]
         if not chosen and self.sel_vertex is not None and 0 <= self.sel_vertex < len(b.vertices):
             chosen = [self.sel_vertex]

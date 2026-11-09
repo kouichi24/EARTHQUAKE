@@ -13,6 +13,8 @@ class ImageView(QGraphicsView):
     cursorMoved = Signal(QPointF)
     zoomChanged = Signal()
     applyRequested = Signal()
+    deleteRequested = Signal()
+    escapeRequested = Signal()
     dragMoved = Signal(QPointF, QPointF)
     dragFinished = Signal(QPointF, QPointF)
 
@@ -82,6 +84,12 @@ class ImageView(QGraphicsView):
     def keyPressEvent(self, ev):
         if ev.key() in (Qt.Key_Return, Qt.Key_Enter):       # Enter in the image area applies the pending edit
             self.applyRequested.emit()
+            return
+        if ev.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.deleteRequested.emit()
+            return
+        if ev.key() == Qt.Key_Escape:
+            self.escapeRequested.emit()
             return
         super().keyPressEvent(ev)
 
