@@ -116,3 +116,11 @@ def test_xlsx_has_numbers_chart_and_slice_filter(eng, tmp_path):
         assert 2 < light.max_row <= full.max_row             # the chart sheet is lighter
         assert light.auto_filter.ref and len(light._charts) == 1
         assert full.cell(2, 1).value == 1                    # slice number of the first point
+
+
+def test_main_excel_has_native_charts(eng, tmp_path):
+    from openpyxl import load_workbook
+    from traceview.excel_out import export_xlsx
+    wb = load_workbook(export_xlsx(eng, str(tmp_path / "m.xlsx")))
+    assert "グラフ" in wb.sheetnames and wb.sheetnames.index("グラフ") == 1
+    assert len(wb["グラフ"]._charts) == len(eng.bands)       # a real Excel chart for every band, not a picture

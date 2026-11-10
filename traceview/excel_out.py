@@ -21,6 +21,41 @@ class PendingEditsError(Exception):
     pass
 
 
+def _add_charts(wb, ws2, band_rows, unit):
+    """A sheet with a real Excel chart (scatter, straight lines) of every band, drawn from the sheet 復元座標."""
+    from openpyxl.chart import Reference, ScatterChart, Series
+    wsg = wb.create_sheet("グラフ")
+    wsg.cell(1, 1, "トレース線のグラフ（Excelのグラフです。シート「復元座標」の数値から描いています。縦軸は振幅で、上が大きい値）").font = Font(bold=True)
+    row = 3
+    n_drawn = 0
+    for b, r0, r1 in band_rows:
+        if r1 - r0 < 1:
+            continue
+        ch = ScatterChart()
+        ch.title = f"{b.name}（{r1 - r0 + 1}点）"
+        ch.style = 13
+        ch.scatterStyle = "lineMarker"
+        ch.x_axis.title = "X [px]（元画像）"
+        ch.y_axis.title = f"振幅 [{unit}]"
+        ch.x_axis.delete = False
+        ch.y_axis.delete = False
+        ch.legend = None
+        ch.height, ch.width = 11, 28
+        xr = Reference(ws2, min_col=3, min_row=r0, max_row=r1)
+        yr = Reference(ws2, min_col=5, min_row=r0, max_row=r1)
+        s = Series(yr, xr, title=b.name)
+        s.marker.symbol = "none"
+        s.smooth = False
+        s.graphicalProperties.line.solidFill = str(b.color).lstrip("#").upper()
+        s.graphicalProperties.line.width = 9525
+        ch.series.append(s)
+        wsg.add_chart(ch, f"A{row}")
+        row += 24
+        n_drawn += 1
+    wb.move_sheet("グラフ", offset=-(len(wb.sheetnames) - 2))      # right after the first sheet
+    return n_drawn
+
+
 def overlay_image(engine, max_w=1800, with_original=True, draw_vertices=True, draw_lines=True, arc=False):
     img = cv2.cvtColor(engine.work, cv2.COLOR_RGB2BGR) if with_original else \
         np.full(engine.work.shape, 255, np.uint8)
@@ -79,6 +114,8 @@ def export_xlsx(engine, out_path, include_all_points=False):
     ws.title = "測定結果と画像"
     ws["A1"] = "TraceView 測定結果"
     ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = "このシートの図は画像です。編集できるExcelのグラフは、シート「グラフ」にあります。"
+    ws["A2"].font = Font(bold=True, color="C00000")
     meta = [
         ("元ファイル", engine.src_path), ("ページ", engine.page + 1), ("アプリの版", __version__),
         ("出力日時", time.strftime("%Y-%m-%d %H:%M:%S")),
@@ -152,7 +189,9 @@ def export_xlsx(engine, out_path, include_all_points=False):
         cell.font = bold
         cell.fill = hdr_fill
     r = 2
+    band_rows = []                       # (band, first row, last row) in the sheet, for the charts
     for b in engine.bands:
+        first_row = r
         idxs = range(len(b.path)) if include_all_points else sorted(set(_simplify_idx(b.path)) | {v.idx for v in b.vertices})
         vmap = {v.idx: v for v in b.vertices}
         for i in idxs:
@@ -169,7 +208,9 @@ def export_xlsx(engine, out_path, include_all_points=False):
                 row2 += _arc_cols(cal, b, float(x), float(y), inv)
             ws2.append(row2)
             r += 1
+        band_rows.append((b, first_row, r - 1))
     ws2.freeze_panes = "A2"
+    _add_charts(wb, ws2, band_rows, unit)
 
     # ---- sheet 3: vertices
     ws3 = wb.create_sheet("頂点と折返し")

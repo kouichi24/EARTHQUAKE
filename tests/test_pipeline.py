@@ -125,7 +125,7 @@ def test_excel_and_svg(sheet, tmp_path):
     e, _, _ = sheet
     out = export_xlsx(e, str(tmp_path / "m.xlsx"))
     wb = load_workbook(out)
-    assert wb.sheetnames[:3] == ["測定結果と画像", "復元座標", "頂点と折返し"]
+    assert wb.sheetnames[:4] == ["測定結果と画像", "グラフ", "復元座標", "頂点と折返し"]
     assert len(wb["測定結果と画像"]._images) == 2
     assert wb["復元座標"].max_row > 100
     assert wb["頂点と折返し"].max_row > 100
