@@ -657,6 +657,7 @@ class MainWindow(QMainWindow):
         sll.addWidget(self.slice_label)
         for text, fn in (("分割して、別ウィンドウで描き直す", self.action_slice_show),
                          ("分割した数値をCSVに保存", self.action_slice_save),
+                         ("分割した数値をExcelに出力（グラフ付き）", self.action_slice_xlsx),
                          ("保存したCSVを読み込んで、別ウィンドウで描き直す", self.action_slice_open)):
             bt = QPushButton(text)
             bt.clicked.connect(fn)
@@ -1565,6 +1566,29 @@ class MainWindow(QMainWindow):
             self._show_error("出力先に書き込めません。Excelで開いている場合は閉じてから再実行してください")
             return
         self._info(f"分割した数値を保存しました（{len(rows)}点）: {path}")
+
+    def action_slice_xlsx(self, *_):
+        from ..slicing import write_xlsx
+        res = self._slice_rows()
+        if res is None:
+            return
+        rows, unit = res
+        base = os.path.splitext(os.path.basename(self.engine.src_path or "trace"))[0] + "_slices.xlsx"
+        path, _ = QFileDialog.getSaveFileName(self, "分割した数値をExcelに出力", os.path.join(self._last_dir(), base), "Excel (*.xlsx)")
+        if not path:
+            return
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            write_xlsx(path, self.engine, rows, unit, self.slice_step.value())
+        except PermissionError:
+            self._show_error("出力先に書き込めません。Excelで開いている場合は閉じてから再実行してください")
+            return
+        except Exception as ex:  # noqa: BLE001
+            self._show_error(f"Excel出力に失敗しました: {ex}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._info(f"グラフ付きのExcelを出力しました（{len(rows)}点）: {path}")
 
     def action_slice_open(self, *_):
         from ..slicing import SliceError, read_csv

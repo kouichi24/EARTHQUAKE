@@ -99,3 +99,20 @@ def test_main_window_slice_tab(eng, tmp_path, monkeypatch):
     for x in w._slice_windows:
         x.close()
     w.close()
+
+
+def test_xlsx_has_numbers_chart_and_slice_filter(eng, tmp_path):
+    from openpyxl import load_workbook
+    from traceview.slicing import write_xlsx
+    rows = slice_rows(eng, 300, "px")
+    p = tmp_path / "s.xlsx"
+    write_xlsx(p, eng, rows, "px", 300)
+    wb = load_workbook(p)
+    names = [b.name for b in eng.bands]
+    for n in names:
+        full, light = wb[f"{n}_数値"], wb[f"{n}_グラフ"]
+        n_rows = sum(1 for r in rows if r["band"] == n)
+        assert full.max_row == n_rows + 1                    # every point is kept in the numbers sheet
+        assert 2 < light.max_row <= full.max_row             # the chart sheet is lighter
+        assert light.auto_filter.ref and len(light._charts) == 1
+        assert full.cell(2, 1).value == 1                    # slice number of the first point
