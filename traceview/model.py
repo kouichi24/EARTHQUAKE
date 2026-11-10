@@ -37,6 +37,7 @@ class Band:
     guide: list = field(default_factory=list)           # rough route the user drew for this band: [[x, y], ...] (work px)
     guide_width: float = 0.0                            # how far from the route the line may be (work px); 0 = automatic
     erased: list = field(default_factory=list)          # rectangles in which the traced LINE was erased by the user (work px)
+    accepted_links: list = field(default_factory=list)  # estimated links the user confirmed: dict(x0,y0,x1,y1) end points (work px)
     cuts: list = field(default_factory=list)            # path indices j where the line is broken between j and j+1 (erased stretch)
     deleted_points: list = field(default_factory=list)  # vertices the user deleted: dicts {x, y} (work px), kept across re-tracing
     line_zero: float = 0.0
@@ -64,7 +65,7 @@ class Band:
             manual_points=copy.deepcopy(self.manual_points),
             pending=copy.deepcopy(self.pending) if with_pending else [],
             sections=copy.deepcopy(self.sections), deleted_points=copy.deepcopy(self.deleted_points),
-            erased=copy.deepcopy(self.erased), cuts=list(self.cuts),
+            erased=copy.deepcopy(self.erased), cuts=list(self.cuts), accepted_links=copy.deepcopy(self.accepted_links),
             guide=copy.deepcopy(self.guide), guide_width=self.guide_width,
             line_zero=self.line_zero, line_top=self.line_top, line_bottom=self.line_bottom,
             line_top_manual=self.line_top_manual, line_bottom_manual=self.line_bottom_manual,
@@ -89,6 +90,7 @@ class Band:
         self.guide = copy.deepcopy(snap.get("guide", []))
         self.guide_width = snap.get("guide_width", 0.0)
         self.cuts = list(snap.get("cuts", []))
+        self.accepted_links = copy.deepcopy(snap.get("accepted_links", []))
         self.issues = copy.deepcopy(snap["issues"])
 
     def push_undo(self, limit):

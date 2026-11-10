@@ -24,7 +24,7 @@ from ..profiles import PROFILES, get as get_profile
 from ..project import SourceMismatch, load_project, save_project
 from ..svg_out import export_svg
 from ..verify import KINDS as VERIFY_KINDS, find_problems, verify_and_repair
-from .view import EndHandleItem, ImageView, LineItem, PyramidItem, VertexItem, make_path_item, polyline_path
+from .view import EndHandleItem, ImageView, LineItem, LinkItem, PyramidItem, VertexItem, make_path_item, polyline_path
 
 ISSUE_LABEL = {"ambiguous": "所属の曖昧さ", "untracked_end": "末端の未追跡", "inferred": "推定接続",
                "excursion": "他の段への逸脱", "no_origin": "起点未検出", "retrace_failed": "再追跡の失敗",
@@ -1665,13 +1665,19 @@ class MainWindow(QMainWindow):
                     qpath.addPath(polyline_path(simp))
             d["path"] = make_path_item(qpath, b.color, 2)
             self.scene.addItem(d["path"])
-            for a, c in b.inferred:
-                seg = pts[a:c + 1]
-                if len(seg) > 1:
-                    it = make_path_item(polyline_path(seg[::max(1, len(seg) // 60)].tolist() + [seg[-1].tolist()]),
-                                        "#ffd400", 3, dashed=True, z=12)
-                    self.scene.addItem(it)
-                    d["inferred"].append(it)
+            for k, lk in enumerate(e.links(bi)):
+                if lk["accepted"]:
+                    continue                                 # confirmed by the user: it is part of the line now
+                for a, c in lk["spans"]:
+                    seg = pts[a:c + 1]
+                    if len(seg) > 1:
+                        it = LinkItem(self, bi, k, polyline_path(seg[::max(1, len(seg) // 60)].tolist() + [seg[-1].tolist()]))
+                        pen = QPen(QColor("#ffd400"), 3, Qt.DashLine)
+                        pen.setCosmetic(True)
+                        it.setPen(pen)
+                        it.setZValue(12)
+                        self.scene.addItem(it)
+                        d["inferred"].append(it)
         for vi, v in enumerate(b.vertices):
             col = {"auto": b.color, "manual": "#ff8c00", "retrace": "#00bcd4"}.get(v.source, b.color)
             it = VertexItem(self, bi, vi, v.x, v.y, col)
@@ -2178,6 +2184,45 @@ class MainWindow(QMainWindow):
             self._set_state("再追跡", "未適用の修正あり（プレビュー）")
             self.show_edit_preview(bi)
             self.update_edit_tab()
+
+    def _ask_link_action(self, bi, pos):
+        """Show the menu; returns "ok", "release", "all" or None."""
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        a_ok = m.addAction("この推定線を確定する（線として採用）")
+        a_rel = m.addAction("この推定線を解除する（その部分を消す）")
+        m.addSeparator()
+        n_left = sum(1 for l in self.engine.links(bi) if not l["accepted"])
+        a_all = m.addAction(f"この段の推定線をすべて確定する（{n_left}か所）")
+        m.addSeparator()
+        m.addAction("閉じる")
+        act = m.exec(pos.toPoint() if hasattr(pos, "toPoint") else pos)
+        return {id(a_ok): "ok", id(a_rel): "release", id(a_all): "all"}.get(id(act)) if act is not None else None
+
+    def link_menu(self, bi, k, pos):
+        """Click on a yellow estimated link: confirm it, release it, or confirm all of this band's links."""
+        e = self.engine
+        if self.lock_others and bi != self.sel_band:
+            self._info("ほかの段はロック中です。この段を選んでから操作してください")
+            return
+        act = self._ask_link_action(bi, pos)
+        try:
+            if act == "ok":
+                msg = e.accept_link(bi, k)
+            elif act == "release":
+                msg = e.release_link(bi, k)
+            elif act == "all":
+                msg = f"推定線を{e.accept_all_links(bi)}か所、確定しました"
+            else:
+                return
+        except EngineError as ex:
+            self._show_error(str(ex))
+            return
+        self.dirty = True
+        self._build_band_items(bi)
+        self.apply_visibility()
+        self.refresh_panels()
+        self._info(msg + "（戻す(Ctrl+Z)で戻せます）")
 
     def move_mode(self):
         return "local" if self.rb_local.isChecked() else "tail"

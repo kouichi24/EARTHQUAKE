@@ -607,6 +607,8 @@ class Engine:
         for idx, x, y in amb[:200]:
             b.issues.append(Issue("ambiguous", x, y, "交差・接触で所属を判断しにくい箇所"))
         for a, c in inf:
+            if self.link_accepted(b, path, a, c):
+                continue                                     # the user confirmed this estimated link
             b.issues.append(Issue("inferred", float(path[a][0]), float(path[a][1]),
                                   f"画像の薄い線の痕跡をたどって推定でつないだ区間（長さ約{(c - a + 1) / self.scale:.0f}px）"))
         # Stretches that leave the band's own territory (arcs, dirt, other bands) need a human look.
@@ -634,6 +636,82 @@ class Engine:
         if not b.line_top_manual or not b.line_bottom_manual or True:
             self.reset_lines(b, only_auto=True)
 
+    # ------------------------------------------------ estimated links (yellow dashes): confirm or release one by one
+    @staticmethod
+    def _same_end(p, q, tol=4.0):
+        return abs(p[0] - q[0]) <= tol and abs(p[1] - q[1]) <= tol
+
+    def link_accepted(self, b, path, a, c):
+        p, q = (float(path[a][0]), float(path[a][1])), (float(path[c][0]), float(path[c][1]))
+        for l in b.accepted_links:
+            u, v = (l["x0"], l["y0"]), (l["x1"], l["y1"])
+            if (self._same_end(p, u) and self._same_end(q, v)) or (self._same_end(p, v) and self._same_end(q, u)):
+                return True
+        return False
+
+    def links(self, bi):
+        """The estimated links of a band, one entry per link (a spike tip is walked down and back up: one link).
+        Each entry: dict(spans=[(a, c), ...], p0, p1, accepted)."""
+        b = self.bands[bi]
+        out = []
+        for a, c in b.inferred:
+            if not (0 <= a < len(b.path) and 0 <= c < len(b.path)) or c <= a:
+                continue
+            p, q = (float(b.path[a][0]), float(b.path[a][1])), (float(b.path[c][0]), float(b.path[c][1]))
+            for l in out:
+                if (self._same_end(p, l["p0"]) and self._same_end(q, l["p1"])) or \
+                   (self._same_end(p, l["p1"]) and self._same_end(q, l["p0"])):
+                    l["spans"].append((a, c))
+                    break
+            else:
+                out.append(dict(spans=[(a, c)], p0=p, p1=q, accepted=self.link_accepted(b, b.path, a, c)))
+        return out
+
+    def accept_link(self, bi, k):
+        """Confirm one estimated link: it is kept as part of the line and no longer needs checking (undoable)."""
+        b = self.bands[bi]
+        ls = self.links(bi)
+        if not (0 <= k < len(ls)):
+            raise EngineError("その推定線が見つかりません")
+        l = ls[k]
+        if l["accepted"]:
+            return "すでに確定しています"
+        b.push_undo(self.params.undo_limit)
+        b.accepted_links.append(dict(x0=l["p0"][0], y0=l["p0"][1], x1=l["p1"][0], y1=l["p1"][1]))
+        self._finish_band(b, b.path, [], [], b.inferred, b.end_x, recompute_vertices=False)
+        return "推定線を確定しました"
+
+    def accept_all_links(self, bi):
+        b = self.bands[bi]
+        todo = [l for l in self.links(bi) if not l["accepted"]]
+        if not todo:
+            return 0
+        b.push_undo(self.params.undo_limit)
+        for l in todo:
+            b.accepted_links.append(dict(x0=l["p0"][0], y0=l["p0"][1], x1=l["p1"][0], y1=l["p1"][1]))
+        self._finish_band(b, b.path, [], [], b.inferred, b.end_x, recompute_vertices=False)
+        return len(todo)
+
+    def release_link(self, bi, k):
+        """Release one estimated link: the line is taken out along the link (the line is broken there), undoable.
+        It stays released when the band is traced again."""
+        b = self.bands[bi]
+        ls = self.links(bi)
+        if not (0 <= k < len(ls)):
+            raise EngineError("その推定線が見つかりません")
+        l = ls[k]
+        a, c = l["spans"][0]
+        seg = b.path[a:c + 1][::max(1, (c - a) // 40)].tolist() + [b.path[c].tolist()]
+        b.push_undo(self.params.undo_limit)
+        xs, ys = [p[0] for p in seg], [p[1] for p in seg]
+        b.erased.append(dict(x0=float(min(xs)), y0=float(min(ys)), x1=float(max(xs)), y1=float(max(ys)), seg=seg))
+        b.accepted_links = [t for t in b.accepted_links
+                            if not (self._same_end(l["p0"], (t["x0"], t["y0"])) and self._same_end(l["p1"], (t["x1"], t["y1"])))]
+        path, inf = self._apply_erased(b, b.path, b.inferred)
+        self._finish_band(b, path, [], [], inf, b.end_x, recompute_vertices=False)
+        b.confirmed = False
+        return "推定線を解除しました（その部分は線を引いていません）"
+
     def _apply_erased(self, b, path, inf):
         """Take the path points inside the user's erase rectangles out of the line (a gap is left there).
         Vertices on erased points are dropped, indices are renumbered, and the places where the line is broken are
@@ -645,6 +723,12 @@ class Engine:
         x, y = path[:, 0], path[:, 1]
         inside = np.zeros(len(path), bool)
         for r in b.erased:
+            if r.get("seg"):                      # a released estimated link: only the points along that link
+                h, w = self.work.shape[:2]
+                m = np.zeros((h, w), np.uint8)
+                cv2.polylines(m, [np.array(r["seg"], np.int32).reshape(-1, 1, 2)], False, 1, 7)
+                inside |= m[np.clip(y, 0, h - 1), np.clip(x, 0, w - 1)] > 0
+                continue
             inside |= (x >= r["x0"]) & (x <= r["x1"]) & (y >= r["y0"]) & (y <= r["y1"])
         if not inside.any():
             b.cuts = old_cuts

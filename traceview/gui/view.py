@@ -1,6 +1,6 @@
 """Graphics view and items for the comparison canvas (UI-02, UI-03)."""
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPainterPathStroker, QPen
 import cv2
 import numpy as np
 from PySide6.QtGui import QImage, QPixmap
@@ -192,6 +192,33 @@ class VertexItem(QGraphicsEllipseItem):
         self.win.show_drag_bridge(None)
         if moved:
             self.win.on_vertex_dragged(self.band_i, self.vi, self.pos().x(), self.pos().y())
+
+
+class LinkItem(QGraphicsPathItem):
+    """A yellow dashed estimated link. Click it (select tool) to confirm or release it. The click area is wider than the
+    line and keeps a constant size on screen."""
+
+    def __init__(self, win, band_i, link_k, path):
+        super().__init__(path)
+        self.win, self.band_i, self.link_k = win, band_i, link_k
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("推定でつないだ線（クリックで、確定／解除を選べます）")
+
+    def shape(self):
+        z = 1.0
+        sc = self.scene()
+        if sc is not None and sc.views():
+            z = max(abs(sc.views()[0].transform().m11()), 1e-3)
+        st = QPainterPathStroker()
+        st.setWidth(12.0 / z)
+        return st.createStroke(self.path())
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self.win.tool == "select":
+            self.win.link_menu(self.band_i, self.link_k, ev.screenPos())
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
 
 
 class EndHandleItem(VertexItem):
