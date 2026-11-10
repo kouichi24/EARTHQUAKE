@@ -632,6 +632,39 @@ class MainWindow(QMainWindow):
         xl.addWidget(QLabel("削除すると、その範囲の線も再び使われ、該当する段は引き直されます。"
                             "引き直し前の状態は「戻す」(Ctrl+Z)で戻せます。"))
         self.tabs.addTab(xw, "除外")
+        # slice tab: cut along x, keep the numbers of every point, draw again in another window
+        slw = QWidget()
+        sll = QVBoxLayout(slw)
+        sll.addWidget(QLabel("横軸を一定の幅で区切り、区切りごとに、トレース線のすべての点の位置を数値にします。"
+                             "その数値だけから、別のウィンドウで線を描き直せます。区切りは、各段のトレースの始まり（起点）から数えます。"))
+        fsl = QFormLayout()
+        self.slice_unit = QComboBox()
+        for key, lab in (("px", "px（元画像）"), ("mm", "mm（校正が必要）"), ("s", "秒（校正が必要）")):
+            self.slice_unit.addItem(lab, key)
+        self.slice_step = QDoubleSpinBox()
+        self.slice_step.setRange(0.001, 1000000)
+        self.slice_step.setDecimals(3)
+        self.slice_step.setValue(200.0)
+        self.slice_step.setToolTip("区切りの幅。好きな値を入れられます（単位は上の選択）")
+        fsl.addRow("単位", self.slice_unit)
+        fsl.addRow("区切りの幅", self.slice_step)
+        sll.addLayout(fsl)
+        self.slice_all = QCheckBox("全段を対象にする（外すと、選んでいる段だけ）")
+        self.slice_all.setChecked(True)
+        sll.addWidget(self.slice_all)
+        self.slice_label = QLabel("")
+        self.slice_label.setWordWrap(True)
+        sll.addWidget(self.slice_label)
+        for text, fn in (("分割して、別ウィンドウで描き直す", self.action_slice_show),
+                         ("分割した数値をCSVに保存", self.action_slice_save),
+                         ("保存したCSVを読み込んで、別ウィンドウで描き直す", self.action_slice_open)):
+            bt = QPushButton(text)
+            bt.clicked.connect(fn)
+            sll.addWidget(bt)
+        sll.addWidget(QLabel("CSVの列: 段・区切り番号・区切りの範囲・点の順番・X(px)・Y(px)・X(選んだ単位)・振幅。"
+                             "X・Yは元画像のpxです。CSVは別のパソコンでも、読み込んで描き直せます。"))
+        sll.addStretch(1)
+        self.tabs.addTab(slw, "分割")
         # verify tab
         vw2 = QWidget()
         vl2 = QVBoxLayout(vw2)
@@ -1479,6 +1512,71 @@ class MainWindow(QMainWindow):
             return False
         self._info(f"Excelを出力しました: {path}")
         return True
+
+    # ------------------------------------------------------------- slices
+    def _slice_rows(self):
+        from ..slicing import SliceError, available_units, slice_rows
+        e = self.engine
+        if not e.bands or not any(len(b.path) for b in e.bands):
+            self._show_error("トレースした線がありません。先に解析してください")
+            return None
+        unit = self.slice_unit.currentData()
+        if unit not in available_units(e):
+            self._show_error("この単位には、「校正」タブでの設定が必要です。px を選ぶか、校正してください")
+            return None
+        bands = None if self.slice_all.isChecked() else {self.sel_band}
+        try:
+            return slice_rows(e, self.slice_step.value(), unit, bands), unit
+        except SliceError as ex:
+            self._show_error(str(ex))
+            return None
+
+    def _open_slice_window(self, rows, unit, step):
+        from .slice_window import SliceWindow
+        colors = {b.name: b.color for b in self.engine.bands}
+        w = SliceWindow(rows, unit, step, colors=colors)
+        self._slice_windows = [x for x in getattr(self, "_slice_windows", []) if x.isVisible()] + [w]
+        w.show()
+        return w
+
+    def action_slice_show(self, *_):
+        res = self._slice_rows()
+        if res is None:
+            return
+        rows, unit = res
+        step = self.slice_step.value()
+        n = len({r["slice"] for r in rows})
+        self.slice_label.setText(f"{len(rows)}点を、{n}区切り（幅 {step:g} {unit}）に分けました。")
+        self._open_slice_window(rows, unit, step)
+
+    def action_slice_save(self, *_):
+        from ..slicing import save_csv
+        res = self._slice_rows()
+        if res is None:
+            return
+        rows, unit = res
+        base = os.path.splitext(os.path.basename(self.engine.src_path or "trace"))[0] + "_slices.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "分割した数値をCSVに保存", os.path.join(self._last_dir(), base), "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            save_csv(path, rows, unit, self.slice_step.value())
+        except PermissionError:
+            self._show_error("出力先に書き込めません。Excelで開いている場合は閉じてから再実行してください")
+            return
+        self._info(f"分割した数値を保存しました（{len(rows)}点）: {path}")
+
+    def action_slice_open(self, *_):
+        from ..slicing import SliceError, read_csv
+        path, _ = QFileDialog.getOpenFileName(self, "分割CSVを開く", self._last_dir(), "CSV (*.csv)")
+        if not path:
+            return
+        try:
+            rows, unit, step = read_csv(path)
+        except (SliceError, OSError) as ex:
+            self._show_error(f"CSVを読み込めません: {ex}")
+            return
+        self._open_slice_window(rows, unit, step)
 
     def action_export_svg(self):
         e = self.engine
